@@ -5,11 +5,9 @@
   "scripts": {
     "start": "node index.js"
   },
-{
   "dependencies": {
     "alchemy-sdk": "^2.4.3",
     "dotenv": "^16.0.3",
     "twitter-api-v2": "^1.14.0"
   }
-}
 }
