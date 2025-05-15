@@ -3,7 +3,6 @@ const { TwitterApi } = require('twitter-api-v2');
 const { Alchemy, Network } = require('alchemy-sdk');
 const retry = require('async-retry');
 const axios = require('axios');
-const ENS = require('ethereum-ens');
 require('dotenv').config();
 
 // Configuration
@@ -176,15 +175,13 @@ async function getEthPrice() {
   }
 }
 
-// Function to get ENS name for an address
+// Function to get ENS name for an address using Alchemy directly
 async function getEnsName(address) {
   try {
     // For now, just return null to use fallback
-    // In production, uncomment this:
-    // const provider = alchemy.core.provider;
-    // const ens = new ENS(provider);
-    // const name = await ens.reverse(address).name();
-    // return name;
+    // In production, uncomment this to use Alchemy to resolve ENS names:
+    // const ensName = await alchemy.core.lookupAddress(address);
+    // return ensName;
     
     // For testing - sometimes return a dummy ENS name
     if (Math.random() > 0.7) {
