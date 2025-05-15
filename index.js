@@ -52,13 +52,27 @@ const contractNames = {
 
 // Project info with artist names
 const projectInfo = {
+  // Flagship V1 (main contract)
   '0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270': {
     0: { name: 'Chromie Squiggle', artist: 'Snowfro' },
     3: { name: 'Fidenza', artist: 'Tyler Hobbs' },
     4: { name: 'Ringers', artist: 'Dmitri Cherniak' },
-    // Add more as needed
+    5: { name: 'Archetype', artist: 'Kjetil Golid' },
+    23: { name: 'Gazers', artist: 'Matt Kane' },
+    24: { name: 'Genesis', artist: 'DCA' },
+    94: { name: 'Elevated Deconstructions', artist: 'Emon Hassan' },
+    237: { name: 'Subscapes', artist: 'Matt DesLauriers' },
   },
-  // Add mappings for other contracts
+  // Flagship V0
+  '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a': {
+    0: { name: 'Chromie Squiggle (Genesis)', artist: 'Snowfro' },
+  },
+  // Curated V3.2
+  '0xab0000000000aa06f89b268d604a9c1c41524ac6': {
+    0: { name: 'Moments of Computation', artist: 'William Mapan' },
+    1: { name: 'Sudfeh', artist: 'Monica Rizzolli' },
+  },
+  // Add other contracts as needed
 };
 
 // Initialize HTTP server for health checks and manual triggers
@@ -178,16 +192,10 @@ async function getEthPrice() {
 // Function to get ENS name for an address using Alchemy directly
 async function getEnsName(address) {
   try {
-    // For now, just return null to use fallback
-    // In production, uncomment this to use Alchemy to resolve ENS names:
-    // const ensName = await alchemy.core.lookupAddress(address);
-    // return ensName;
-    
-    // For testing - sometimes return a dummy ENS name
-    if (Math.random() > 0.7) {
-      return `user-${Math.floor(Math.random() * 1000)}.eth`;
-    }
-    return null;
+    // Using Alchemy to resolve ENS names
+    const ensName = await alchemy.core.lookupAddress(address);
+    console.log(`ENS lookup for ${address}: ${ensName || 'Not found'}`);
+    return ensName;
   } catch (error) {
     console.error('Error getting ENS name:', error);
     return null;
@@ -197,20 +205,28 @@ async function getEnsName(address) {
 // Function to get OpenSea username
 async function getOpenseaUserName(address) {
   try {
-    // For testing, sometimes return a dummy OpenSea username
-    if (Math.random() > 0.5) {
-      return `OpenseaUser${Math.floor(Math.random() * 1000)}`;
-    }
+    // Log the address we're looking up
+    console.log(`Looking up OpenSea username for address: ${address}`);
     
-    // In production, uncomment this to use the real API:
-    // const response = await axios.get(`https://api.opensea.io/api/v2/accounts/${address}`, {
-    //   headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY }
-    // });
-    // return response.data.username || null;
+    const response = await axios.get(`https://api.opensea.io/api/v2/accounts/${address}`, {
+      headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY }
+    });
     
-    return null;
+    // Log the full response to see its structure
+    console.log('OpenSea API response:', JSON.stringify(response.data, null, 2));
+    
+    // Extract username based on response structure
+    // This path may need adjustment based on actual API response
+    const username = response.data.username || null;
+    console.log(`Found OpenSea username: ${username || 'None'}`);
+    
+    return username;
   } catch (error) {
-    console.error('Error getting OpenSea username:', error);
+    console.error(`Error getting OpenSea username: ${error.message}`);
+    // If response contains error data, log it for debugging
+    if (error.response && error.response.data) {
+      console.error('OpenSea API error response:', JSON.stringify(error.response.data, null, 2));
+    }
     return null;
   }
 }
