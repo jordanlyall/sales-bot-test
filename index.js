@@ -16,8 +16,6 @@ const CONFIG = {
     '0x64780ce53f6e966e18a22af13a2f97369580ec11', // Art Blocks Collaborations
     '0x942bc2d3e7a589fe5bd4a5c6ef9727dfd82f5c8a', // Art Blocks Explorations
     '0xea698596b6009a622c3ed00dd5a8b5d1cae4fc36', // Art Blocks Collaborations
-    // Add additional Art Blocks contract addresses here    
-    // Example: '0x99a9B7c1116f9ceEB1652de04d5969cce509B069', // Art Blocks Engine contract
   ],
   // OpenSea contract address
   OPENSEA_ADDRESS: '0x7f268357a8c2552623316e2562d90e642bb538e5',
@@ -29,6 +27,29 @@ const CONFIG = {
   MAX_RETRIES: 3,
   // Time between retries (base milliseconds)
   RETRY_DELAY: 3000
+};
+
+// Automatically generate OpenSea URLs for all contracts
+function updateContractMapping() {
+  const mapping = {};
+  CONFIG.CONTRACT_ADDRESSES.forEach(address => {
+    // Make sure address is consistent (lowercase)
+    const normalizedAddress = address.toLowerCase();
+    mapping[normalizedAddress] = `https://opensea.io/assets/ethereum/${normalizedAddress}/`;
+  });
+  return mapping;
+}
+
+// Contract name mapping for better descriptive names
+const contractNames = {
+  '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a': 'Art Blocks Flagship V0',
+  '0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270': 'Art Blocks Flagship V1',
+  '0x99a9b7c1116f9ceeb1652de04d5969cce509b069': 'Art Blocks Flagship V3',
+  '0xab0000000000aa06f89b268d604a9c1c41524ac6': 'Art Blocks Curated V3.2',
+  '0x145789247973c5d612bf121e9e4eef84b63eb707': 'Art Blocks Collaborations',
+  '0x64780ce53f6e966e18a22af13a2f97369580ec11': 'Art Blocks Collaborations',
+  '0x942bc2d3e7a589fe5bd4a5c6ef9727dfd82f5c8a': 'Art Blocks Explorations',
+  '0xea698596b6009a622c3ed00dd5a8b5d1cae4fc36': 'Art Blocks Collaborations',
 };
 
 // Initialize HTTP server for health checks and manual triggers
@@ -100,40 +121,42 @@ try {
   console.error('Error initializing Alchemy client:', error);
 }
 
-// Mapping for contract address to OpenSea URL
-const contractMapping = {
-  '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270': 'https://opensea.io/assets/ethereum/0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270/',
-  // Add more contracts with their OpenSea URLs
-  // Example: '0x99a9B7c1116f9ceEB1652de04d5969cce509B069': 'https://opensea.io/assets/ethereum/0x99a9B7c1116f9ceEB1652de04d5969cce509B069/',
-};
+// Generate OpenSea URLs for all contracts
+const contractMapping = updateContractMapping();
 
 // Project name mappings - expand this with project IDs for each contract
 // You can customize this further with a nested structure if needed
 const projectNameMappings = {
-  // Main Art Blocks contract
-  '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270': {
+  // Main Art Blocks contract (flagship v1)
+  '0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270': {
     0: 'Chromie Squiggle by Snowfro',
     3: 'Fidenza by Tyler Hobbs',
     4: 'Ringers by Dmitri Cherniak',
-    // Add more projects here
+    // Add more projects here as needed
   },
-  // Add mappings for other contracts
-  // Example: '0x99a9B7c1116f9ceEB1652de04d5969cce509B069': { projectIds and names... }
+  // Add mappings for other contracts as needed
 };
 
-// Function to get project details from token ID and contract address
+// Simplified getProjectDetails function
 function getProjectDetails(tokenId, contractAddress) {
   const projectId = Math.floor(tokenId / 1000000);
   const tokenNumber = tokenId % 1000000;
   
+  // Normalize contract address
+  const normalizedAddress = contractAddress.toLowerCase();
+  
   // Get the project name mapping for this contract
-  const contractProjects = projectNameMappings[contractAddress] || {};
+  const contractProjects = projectNameMappings[normalizedAddress] || {};
+  
+  // Use mapped name if available, otherwise generate a descriptive one
+  const contractType = contractNames[normalizedAddress] || 'Art Blocks';
+  const projectName = contractProjects[projectId] || `${contractType} #${projectId}`;
   
   return {
     projectId,
     tokenNumber,
-    projectName: contractProjects[projectId] || `Art Blocks #${projectId}`,
-    contractAddress
+    projectName,
+    contractAddress: normalizedAddress
   };
 }
 
@@ -229,7 +252,7 @@ Token #${details.tokenNumber}
 💰 ${formatPrice(priceEth)} ETH
 
 🛒 Via OpenSea
-🔗 ${contractMapping[contractAddress]}${tokenId}
+🔗 ${contractMapping[details.contractAddress]}${tokenId}
 
 #ArtBlocks #NFT #GenerativeArt`;
               
