@@ -15,7 +15,6 @@ const CONFIG = {
     '0x145789247973c5d612bf121e9e4eef84b63eb707', // Art Blocks Collaborations
     '0x64780ce53f6e966e18a22af13a2f97369580ec11', // Art Blocks Collaborations
     '0x942bc2d3e7a589fe5bd4a5c6ef9727dfd82f5c8a', // Art Blocks Explorations
-    '0x99a9b7c1116f9ceeb1652de04d5969cce509b069', // Art Blocks Flagship
     '0xea698596b6009a622c3ed00dd5a8b5d1cae4fc36', // Art Blocks Collaborations
     // Add additional Art Blocks contract addresses here    
     // Example: '0x99a9B7c1116f9ceEB1652de04d5969cce509B069', // Art Blocks Engine contract
