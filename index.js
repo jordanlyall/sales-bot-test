@@ -9,7 +9,7 @@ const CONFIG = {
   // Art Blocks contract address
   CONTRACT_ADDRESS: '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270',
   // Minimum price in ETH to report
-  MIN_PRICE_ETH: 0.5,
+  MIN_PRICE_ETH: 0.01,
   // How often to check if the bot is alive (in milliseconds)
   HEALTH_CHECK_INTERVAL: 3600000, // 1 hour
   // Number of retries for API calls
