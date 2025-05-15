@@ -6,8 +6,14 @@ require('dotenv').config();
 
 // Configuration
 const CONFIG = {
-  // Art Blocks contract address
-  CONTRACT_ADDRESS: '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270',
+  // Art Blocks contract addresses - add all your contract addresses here
+  CONTRACT_ADDRESSES: [
+    '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270', // Main Art Blocks contract
+    // Add additional Art Blocks contract addresses here
+    // Example: '0x99a9B7c1116f9ceEB1652de04d5969cce509B069', // Art Blocks Engine contract
+  ],
+  // OpenSea contract address
+  OPENSEA_ADDRESS: '0x7f268357a8c2552623316e2562d90e642bb538e5',
   // Minimum price in ETH to report
   MIN_PRICE_ETH: 0.01,
   // How often to check if the bot is alive (in milliseconds)
@@ -87,36 +93,40 @@ try {
   console.error('Error initializing Alchemy client:', error);
 }
 
-// Set up marketplace mapping
-const marketplaces = {
-  '0x7f268357a8c2552623316e2562d90e642bb538e5': { 
-    name: 'OpenSea', 
-    url: 'https://opensea.io/assets/ethereum/0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270/' 
-  },
-  '0x59728544b08ab483533076417fbbb2fd0b17ce3a': { 
-    name: 'LooksRare', 
-    url: 'https://looksrare.org/collections/0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270/' 
-  },
+// Mapping for contract address to OpenSea URL
+const contractMapping = {
+  '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270': 'https://opensea.io/assets/ethereum/0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270/',
+  // Add more contracts with their OpenSea URLs
+  // Example: '0x99a9B7c1116f9ceEB1652de04d5969cce509B069': 'https://opensea.io/assets/ethereum/0x99a9B7c1116f9ceEB1652de04d5969cce509B069/',
 };
 
-// Curated projects mapping (placeholder - you can expand this)
-const curatedProjects = {
-  0: 'Chromie Squiggle by Snowfro',
-  3: 'Fidenza by Tyler Hobbs',
-  4: 'Ringers by Dmitri Cherniak',
-  // Add more projects here
+// Project name mappings - expand this with project IDs for each contract
+// You can customize this further with a nested structure if needed
+const projectNameMappings = {
+  // Main Art Blocks contract
+  '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270': {
+    0: 'Chromie Squiggle by Snowfro',
+    3: 'Fidenza by Tyler Hobbs',
+    4: 'Ringers by Dmitri Cherniak',
+    // Add more projects here
+  },
+  // Add mappings for other contracts
+  // Example: '0x99a9B7c1116f9ceEB1652de04d5969cce509B069': { projectIds and names... }
 };
 
-// Function to get project details from token ID
-function getProjectDetails(tokenId) {
+// Function to get project details from token ID and contract address
+function getProjectDetails(tokenId, contractAddress) {
   const projectId = Math.floor(tokenId / 1000000);
   const tokenNumber = tokenId % 1000000;
+  
+  // Get the project name mapping for this contract
+  const contractProjects = projectNameMappings[contractAddress] || {};
   
   return {
     projectId,
     tokenNumber,
-    projectName: curatedProjects[projectId] || `Art Blocks #${projectId}`,
-    isCurated: true // We'll assume all monitored projects are curated for now
+    projectName: contractProjects[projectId] || `Art Blocks #${projectId}`,
+    contractAddress
   };
 }
 
@@ -155,7 +165,7 @@ async function sendTweet(message) {
 
 // Function to send a test tweet
 async function sendTestTweet() {
-  return sendTweet(`Art Blocks sales bot is now live! Monitoring Curated collection sales. (${new Date().toLocaleTimeString()})`);
+  return sendTweet(`Art Blocks sales bot is monitoring OpenSea sales for ${CONFIG.CONTRACT_ADDRESSES.length} contracts! (${new Date().toLocaleTimeString()})`);
 }
 
 // Function to format price with commas for thousands
@@ -168,65 +178,64 @@ function formatPrice(price) {
 
 // Function to monitor sales
 async function monitorSales() {
-  console.log('Starting to monitor Art Blocks Curated sales...');
+  console.log('Starting to monitor Art Blocks sales on OpenSea...');
   
   try {
-    // Set up Alchemy monitor
+    // Set up Alchemy monitor for each contract
     if (alchemy) {
       console.log('Setting up Alchemy websocket listener...');
-      alchemy.ws.on(
-        {
-          method: 'alchemy_pendingTransactions',
-          fromAddress: Object.keys(marketplaces),
-          toAddress: CONFIG.CONTRACT_ADDRESS,
-        },
-        async (tx) => {
-          try {
-            console.log(`Processing transaction: ${tx.hash}`);
-            
-            // Get transaction details
-            const transaction = await alchemy.core.getTransaction(tx.hash);
-            if (!transaction || !transaction.to) return;
-            
-            // Extract token ID
-            const tokenId = parseInt(transaction.data.slice(74, 138), 16);
-            const details = getProjectDetails(tokenId);
-            
-            // Skip if not curated (you can add logic here later)
-            if (!details.isCurated) return;
-            
-            // Get price in ETH
-            const priceWei = parseInt(transaction.value, 16);
-            const priceEth = priceWei / 1e18;
-            
-            // Skip if below minimum price
-            if (priceEth < CONFIG.MIN_PRICE_ETH) return;
-            
-            // Get marketplace info
-            const marketplace = marketplaces[transaction.from.toLowerCase()];
-            if (!marketplace) return;
-            
-            // Format tweet
-            const tweetText = `🔄 Art Blocks Sale Alert 🔄
+      
+      CONFIG.CONTRACT_ADDRESSES.forEach(contractAddress => {
+        console.log(`Setting up listener for contract: ${contractAddress}`);
+        
+        alchemy.ws.on(
+          {
+            method: 'alchemy_pendingTransactions',
+            fromAddress: CONFIG.OPENSEA_ADDRESS, // Only monitor OpenSea
+            toAddress: contractAddress,
+          },
+          async (tx) => {
+            try {
+              console.log(`Processing transaction for ${contractAddress}: ${tx.hash}`);
+              
+              // Get transaction details
+              const transaction = await alchemy.core.getTransaction(tx.hash);
+              if (!transaction || !transaction.to) return;
+              
+              // Extract token ID from transaction data
+              const tokenId = parseInt(transaction.data.slice(74, 138), 16);
+              const details = getProjectDetails(tokenId, contractAddress);
+              
+              // Get price in ETH
+              const priceWei = parseInt(transaction.value, 16);
+              const priceEth = priceWei / 1e18;
+              
+              // Skip if below minimum price
+              if (priceEth < CONFIG.MIN_PRICE_ETH) return;
+              
+              // Format tweet
+              const tweetText = `🔄 Art Blocks Sale Alert 🔄
 
 ${details.projectName}
 Token #${details.tokenNumber}
 
 💰 ${formatPrice(priceEth)} ETH
 
-🛒 Via ${marketplace.name}
-🔗 ${marketplace.url}${tokenId}
+🛒 Via OpenSea
+🔗 ${contractMapping[contractAddress]}${tokenId}
 
 #ArtBlocks #NFT #GenerativeArt`;
-            
-            // Send the tweet
-            await sendTweet(tweetText);
-          } catch (error) {
-            console.error('Error processing transaction:', error);
+              
+              // Send the tweet
+              await sendTweet(tweetText);
+            } catch (error) {
+              console.error('Error processing transaction:', error);
+            }
           }
-        }
-      );
-      console.log('Alchemy listener set up successfully');
+        );
+      });
+      
+      console.log('Alchemy listeners set up successfully');
     } else {
       console.error('Alchemy client not initialized, sales monitoring disabled');
     }
@@ -263,4 +272,4 @@ try {
   console.error('Error starting bot:', error);
 }
 
-console.log('Art Blocks Sales Bot is now running and monitoring for sales');
+console.log('Art Blocks Sales Bot is now running and monitoring for OpenSea sales');
