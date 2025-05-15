@@ -8,14 +8,22 @@ require('dotenv').config();
 const CONFIG = {
   // Art Blocks contract addresses - add all your contract addresses here
   CONTRACT_ADDRESSES: [
-    '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270', // Main Art Blocks contract
-    // Add additional Art Blocks contract addresses here
+    '0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a', // Art Blocks Flagship V0
+    '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270', // Art Blocks Flagship V1
+    '0x99a9B7c1116f9ceEB1652de04d5969CcE509B069', // Art Blocks Flagship V3
+    '0xAB0000000000aa06f89B268D604a9c1C41524Ac6', // Art Blocks Curated V3.2
+    '0x145789247973c5d612bf121e9e4eef84b63eb707', // Art Blocks Collaborations
+    '0x64780ce53f6e966e18a22af13a2f97369580ec11', // Art Blocks Collaborations
+    '0x942bc2d3e7a589fe5bd4a5c6ef9727dfd82f5c8a', // Art Blocks Explorations
+    '0x99a9b7c1116f9ceeb1652de04d5969cce509b069', // Art Blocks Flagship
+    '0xea698596b6009a622c3ed00dd5a8b5d1cae4fc36', // Art Blocks Collaborations
+    // Add additional Art Blocks contract addresses here    
     // Example: '0x99a9B7c1116f9ceEB1652de04d5969cce509B069', // Art Blocks Engine contract
   ],
   // OpenSea contract address
   OPENSEA_ADDRESS: '0x7f268357a8c2552623316e2562d90e642bb538e5',
   // Minimum price in ETH to report
-  MIN_PRICE_ETH: 0.01,
+  MIN_PRICE_ETH: 0.001,
   // How often to check if the bot is alive (in milliseconds)
   HEALTH_CHECK_INTERVAL: 3600000, // 1 hour
   // Number of retries for API calls
