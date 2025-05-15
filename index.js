@@ -55,3 +55,17 @@ async function sendTestTweet() {
     return tweet;
   } catch (error) {
     console.error('Error sending test tweet:', error);
+    return null;
+  }
+}
+
+// Call the function
+sendTestTweet().then(result => {
+  if (result) {
+    console.log('Test tweet function completed successfully');
+  } else {
+    console.log('Test tweet function completed with errors');
+  }
+});
+
+console.log('Bot is running with Twitter client initialized');
