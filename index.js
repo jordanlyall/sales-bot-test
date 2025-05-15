@@ -42,4 +42,31 @@ try {
   console.error('Error initializing Twitter client:', error);
 }
 
+
 console.log('Bot is running with Twitter client initialized');
+
+// Add after Twitter client initialization
+async function sendTestTweet() {
+  if (!twitterClient) {
+    console.error('Cannot send test tweet - Twitter client not initialized');
+    return;
+  }
+  
+  try {
+    const tweet = await twitterClient.v2.tweet('Art Blocks sales bot is now live! Test tweet from Railway.');
+    console.log('Test tweet sent successfully:', tweet.data.id);
+    return tweet;
+  } catch (error) {
+    console.error('Error sending test tweet:', error);
+    return null;
+  }
+}
+
+// Call the function
+sendTestTweet().then(result => {
+  if (result) {
+    console.log('Test tweet function completed successfully');
+  } else {
+    console.log('Test tweet function completed with errors');
+  }
+});
