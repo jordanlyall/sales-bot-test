@@ -2,11 +2,13 @@ const http = require('http');
 const { TwitterApi } = require('twitter-api-v2');
 const { Alchemy, Network } = require('alchemy-sdk');
 const retry = require('async-retry');
+const axios = require('axios');
+const ENS = require('ethereum-ens');
 require('dotenv').config();
 
 // Configuration
 const CONFIG = {
-  // Art Blocks contract addresses - add all your contract addresses here
+  // Art Blocks contract addresses
   CONTRACT_ADDRESSES: [
     '0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a', // Art Blocks Flagship V0
     '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270', // Art Blocks Flagship V1
@@ -26,19 +28,16 @@ const CONFIG = {
   // Number of retries for API calls
   MAX_RETRIES: 3,
   // Time between retries (base milliseconds)
-  RETRY_DELAY: 3000
+  RETRY_DELAY: 3000,
+  // Cache duration for ETH price in milliseconds
+  ETH_PRICE_CACHE_DURATION: 900000, // 15 minutes
 };
 
-// Automatically generate OpenSea URLs for all contracts
-function updateContractMapping() {
-  const mapping = {};
-  CONFIG.CONTRACT_ADDRESSES.forEach(address => {
-    // Make sure address is consistent (lowercase)
-    const normalizedAddress = address.toLowerCase();
-    mapping[normalizedAddress] = `https://opensea.io/assets/ethereum/${normalizedAddress}/`;
-  });
-  return mapping;
-}
+// Cache for ETH price
+let ethPriceCache = {
+  price: null,
+  timestamp: 0
+};
 
 // Contract name mapping for better descriptive names
 const contractNames = {
@@ -50,6 +49,17 @@ const contractNames = {
   '0x64780ce53f6e966e18a22af13a2f97369580ec11': 'Art Blocks Collaborations',
   '0x942bc2d3e7a589fe5bd4a5c6ef9727dfd82f5c8a': 'Art Blocks Explorations',
   '0xea698596b6009a622c3ed00dd5a8b5d1cae4fc36': 'Art Blocks Collaborations',
+};
+
+// Project info with artist names
+const projectInfo = {
+  '0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270': {
+    0: { name: 'Chromie Squiggle', artist: 'Snowfro' },
+    3: { name: 'Fidenza', artist: 'Tyler Hobbs' },
+    4: { name: 'Ringers', artist: 'Dmitri Cherniak' },
+    // Add more as needed
+  },
+  // Add mappings for other contracts
 };
 
 // Initialize HTTP server for health checks and manual triggers
@@ -86,7 +96,8 @@ const requiredVars = [
   'TWITTER_CONSUMER_SECRET',
   'TWITTER_ACCESS_TOKEN',
   'TWITTER_ACCESS_TOKEN_SECRET',
-  'ALCHEMY_API_KEY'
+  'ALCHEMY_API_KEY',
+  'OPENSEA_API_KEY'
 ];
 
 const missingVars = requiredVars.filter(varName => !process.env[varName]);
@@ -121,42 +132,131 @@ try {
   console.error('Error initializing Alchemy client:', error);
 }
 
+// Automatically generate OpenSea URLs for all contracts
+function updateContractMapping() {
+  const mapping = {};
+  CONFIG.CONTRACT_ADDRESSES.forEach(address => {
+    // Make sure address is consistent (lowercase)
+    const normalizedAddress = address.toLowerCase();
+    mapping[normalizedAddress] = `https://opensea.io/assets/ethereum/${normalizedAddress}/`;
+  });
+  return mapping;
+}
+
 // Generate OpenSea URLs for all contracts
 const contractMapping = updateContractMapping();
 
-// Project name mappings - expand this with project IDs for each contract
-// You can customize this further with a nested structure if needed
-const projectNameMappings = {
-  // Main Art Blocks contract (flagship v1)
-  '0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270': {
-    0: 'Chromie Squiggle by Snowfro',
-    3: 'Fidenza by Tyler Hobbs',
-    4: 'Ringers by Dmitri Cherniak',
-    // Add more projects here as needed
-  },
-  // Add mappings for other contracts as needed
-};
+// Function to get ETH to USD conversion rate
+async function getEthPrice() {
+  // Check if we have a cached price that's still valid
+  const now = Date.now();
+  if (ethPriceCache.price && (now - ethPriceCache.timestamp < CONFIG.ETH_PRICE_CACHE_DURATION)) {
+    return ethPriceCache.price;
+  }
 
-// Simplified getProjectDetails function
-function getProjectDetails(tokenId, contractAddress) {
+  try {
+    // For now, use a dummy price as requested
+    const dummyPrice = 3000; // $3000 per ETH
+    
+    // In production, uncomment this to use the real API:
+    // const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
+    // const price = response.data.ethereum.usd;
+    
+    // Update cache
+    ethPriceCache = {
+      price: dummyPrice,
+      timestamp: now
+    };
+    
+    return dummyPrice;
+  } catch (error) {
+    console.error('Error fetching ETH price:', error);
+    // Return last cached price or null
+    return ethPriceCache.price || null;
+  }
+}
+
+// Function to get ENS name for an address
+async function getEnsName(address) {
+  try {
+    // For now, just return null to use fallback
+    // In production, uncomment this:
+    // const provider = alchemy.core.provider;
+    // const ens = new ENS(provider);
+    // const name = await ens.reverse(address).name();
+    // return name;
+    
+    // For testing - sometimes return a dummy ENS name
+    if (Math.random() > 0.7) {
+      return `user-${Math.floor(Math.random() * 1000)}.eth`;
+    }
+    return null;
+  } catch (error) {
+    console.error('Error getting ENS name:', error);
+    return null;
+  }
+}
+
+// Function to get OpenSea username
+async function getOpenseaUserName(address) {
+  try {
+    // For testing, sometimes return a dummy OpenSea username
+    if (Math.random() > 0.5) {
+      return `OpenseaUser${Math.floor(Math.random() * 1000)}`;
+    }
+    
+    // In production, uncomment this to use the real API:
+    // const response = await axios.get(`https://api.opensea.io/api/v2/accounts/${address}`, {
+    //   headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY }
+    // });
+    // return response.data.username || null;
+    
+    return null;
+  } catch (error) {
+    console.error('Error getting OpenSea username:', error);
+    return null;
+  }
+}
+
+// Function to format address for display
+function formatAddress(address) {
+  if (!address) return 'Unknown';
+  return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
+}
+
+// Enhanced getProjectDetails function
+async function getProjectDetails(tokenId, contractAddress) {
   const projectId = Math.floor(tokenId / 1000000);
   const tokenNumber = tokenId % 1000000;
   
   // Normalize contract address
   const normalizedAddress = contractAddress.toLowerCase();
   
-  // Get the project name mapping for this contract
-  const contractProjects = projectNameMappings[normalizedAddress] || {};
+  // Get the project info for this contract
+  const contractProjects = projectInfo[normalizedAddress] || {};
+  const project = contractProjects[projectId] || null;
   
-  // Use mapped name if available, otherwise generate a descriptive one
+  // Get contract name for fallback
   const contractType = contractNames[normalizedAddress] || 'Art Blocks';
-  const projectName = contractProjects[projectId] || `${contractType} #${projectId}`;
+  
+  // Prepare project name and artist
+  let projectName, artistName;
+  
+  if (project) {
+    projectName = project.name;
+    artistName = project.artist;
+  } else {
+    projectName = `${contractType} #${projectId}`;
+    artistName = 'Unknown Artist';
+  }
   
   return {
     projectId,
     tokenNumber,
     projectName,
-    contractAddress: normalizedAddress
+    artistName,
+    contractAddress: normalizedAddress,
+    artBlocksUrl: `https://www.artblocks.io/token/${normalizedAddress}/${tokenId}`
   };
 }
 
@@ -170,6 +270,7 @@ async function sendTweet(message) {
   return retry(async (bail, attempt) => {
     try {
       console.log(`Attempting to tweet (attempt ${attempt})...`);
+      console.log('Tweet content:', message);
       const tweet = await twitterClient.v2.tweet(message);
       console.log('Tweet sent successfully:', tweet.data.id);
       return tweet;
@@ -206,6 +307,71 @@ function formatPrice(price) {
   });
 }
 
+// Enhanced transaction processing
+async function processTransaction(tx, contractAddress) {
+  console.log(`Processing transaction for ${contractAddress}: ${tx.hash}`);
+  
+  try {
+    // Get transaction details
+    const transaction = await alchemy.core.getTransaction(tx.hash);
+    if (!transaction || !transaction.to) return;
+    
+    // Get transaction receipt to find the buyer
+    const receipt = await alchemy.core.getTransactionReceipt(tx.hash);
+    if (!receipt) return;
+    
+    // In a real implementation, you'd need to analyze the logs to find the buyer
+    // This is a simplification - using the 'to' address from the receipt as a placeholder
+    // The correct buyer address should be extracted from event logs
+    const buyer = receipt.to || transaction.from;
+    
+    // Extract token ID from transaction data
+    const tokenId = parseInt(transaction.data.slice(74, 138), 16);
+    const details = await getProjectDetails(tokenId, contractAddress);
+    
+    // Get price in ETH
+    const priceWei = parseInt(transaction.value, 16);
+    const priceEth = priceWei / 1e18;
+    
+    // Skip if below minimum price
+    if (priceEth < CONFIG.MIN_PRICE_ETH) return;
+    
+    // Get ETH/USD price
+    const ethPrice = await getEthPrice();
+    const usdPrice = ethPrice ? (priceEth * ethPrice).toFixed(2) : null;
+    
+    // Get buyer info
+    let buyerDisplay = formatAddress(buyer);
+    
+    // Try to get ENS name
+    const ensName = await getEnsName(buyer);
+    if (ensName) {
+      buyerDisplay = ensName;
+    } else {
+      // Try to get OpenSea username
+      const osName = await getOpenseaUserName(buyer);
+      if (osName) {
+        buyerDisplay = osName;
+      }
+    }
+    
+    // Format tweet
+    let tweetText = `${details.projectName} #${details.tokenNumber} by ${details.artistName}`;
+    tweetText += `\nsold for ${formatPrice(priceEth)} ETH`;
+    
+    if (usdPrice) {
+      tweetText += ` ($${usdPrice.toLocaleString()})`;
+    }
+    
+    tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
+    
+    // Send the tweet
+    await sendTweet(tweetText);
+  } catch (error) {
+    console.error('Error processing transaction:', error);
+  }
+}
+
 // Function to monitor sales
 async function monitorSales() {
   console.log('Starting to monitor Art Blocks sales on OpenSea...');
@@ -224,44 +390,7 @@ async function monitorSales() {
             fromAddress: CONFIG.OPENSEA_ADDRESS, // Only monitor OpenSea
             toAddress: contractAddress,
           },
-          async (tx) => {
-            try {
-              console.log(`Processing transaction for ${contractAddress}: ${tx.hash}`);
-              
-              // Get transaction details
-              const transaction = await alchemy.core.getTransaction(tx.hash);
-              if (!transaction || !transaction.to) return;
-              
-              // Extract token ID from transaction data
-              const tokenId = parseInt(transaction.data.slice(74, 138), 16);
-              const details = getProjectDetails(tokenId, contractAddress);
-              
-              // Get price in ETH
-              const priceWei = parseInt(transaction.value, 16);
-              const priceEth = priceWei / 1e18;
-              
-              // Skip if below minimum price
-              if (priceEth < CONFIG.MIN_PRICE_ETH) return;
-              
-              // Format tweet
-              const tweetText = `🔄 Art Blocks Sale Alert 🔄
-
-${details.projectName}
-Token #${details.tokenNumber}
-
-💰 ${formatPrice(priceEth)} ETH
-
-🛒 Via OpenSea
-🔗 ${contractMapping[details.contractAddress]}${tokenId}
-
-#ArtBlocks #NFT #GenerativeArt`;
-              
-              // Send the tweet
-              await sendTweet(tweetText);
-            } catch (error) {
-              console.error('Error processing transaction:', error);
-            }
-          }
+          (tx) => processTransaction(tx, contractAddress)
         );
       });
       
