@@ -1,7 +1,8 @@
 const http = require('http');
+const { TwitterApi } = require('twitter-api-v2');
 require('dotenv').config();
 
-// Simple HTTP server for health checks
+// HTTP server for health checks
 const server = http.createServer((req, res) => {
   res.writeHead(200, {'Content-Type': 'text/plain'});
   res.end('Art Blocks Sales Bot is running');
@@ -12,8 +13,33 @@ server.listen(process.env.PORT || 3000, () => {
 });
 
 // Check environment variables
-console.log('Environment variables available:', Object.keys(process.env)
-  .filter(key => key.includes('TWITTER') || key.includes('ALCHEMY'))
-  .length);
+console.log('Starting with environment check...');
+const requiredVars = [
+  'TWITTER_CONSUMER_KEY', 
+  'TWITTER_CONSUMER_SECRET',
+  'TWITTER_ACCESS_TOKEN',
+  'TWITTER_ACCESS_TOKEN_SECRET',
+  'ALCHEMY_API_KEY'
+];
 
-console.log('Bot is running in simplified mode');
+const missingVars = requiredVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+  console.error(`Missing required environment variables: ${missingVars.join(', ')}`);
+  console.log('Continuing without some variables for debugging purposes');
+}
+
+// Initialize Twitter client
+let twitterClient;
+try {
+  twitterClient = new TwitterApi({
+    appKey: process.env.TWITTER_CONSUMER_KEY,
+    appSecret: process.env.TWITTER_CONSUMER_SECRET,
+    accessToken: process.env.TWITTER_ACCESS_TOKEN,
+    accessSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET,
+  });
+  console.log('Twitter client initialized successfully');
+} catch (error) {
+  console.error('Error initializing Twitter client:', error);
+}
+
+console.log('Bot is running with Twitter client initialized');
