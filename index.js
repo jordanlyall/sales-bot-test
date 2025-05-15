@@ -70,3 +70,20 @@ sendTestTweet().then(result => {
     console.log('Test tweet function completed with errors');
   }
 });
+
+
+// Add after imports
+const { Alchemy, Network } = require('alchemy-sdk');
+
+// Add after Twitter initialization
+// Initialize Alchemy client
+let alchemy;
+try {
+  alchemy = new Alchemy({
+    apiKey: process.env.ALCHEMY_API_KEY,
+    network: Network.ETH_MAINNET,
+  });
+  console.log('Alchemy client initialized successfully');
+} catch (error) {
+  console.error('Error initializing Alchemy client:', error);
+}
