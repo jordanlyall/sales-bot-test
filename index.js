@@ -91,6 +91,60 @@ const server = http.createServer((req, res) => {
   } else if (req.url === '/health') {
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('Bot is healthy. Last checked: ' + new Date().toISOString());
+  } else if (req.url.startsWith('/test-transaction')) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const txHash = url.searchParams.get('hash');
+    const contractAddress = url.searchParams.get('contract') || CONFIG.CONTRACT_ADDRESSES[0];
+    
+    if (!txHash) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing transaction hash. Use ?hash=0x... in the URL');
+      return;
+    }
+    
+    console.log(`Manual transaction test received for hash: ${txHash}`);
+    
+    // Create a minimal tx object with the hash
+    const testTx = {
+      hash: txHash
+    };
+    
+    processTransaction(testTx, contractAddress)
+      .then(() => {
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end(`Processing transaction ${txHash} for contract ${contractAddress}. Check logs for results.`);
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
+  } else if (req.url.startsWith('/test-output')) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const txHash = url.searchParams.get('hash');
+    const contractAddress = url.searchParams.get('contract') || CONFIG.CONTRACT_ADDRESSES[0];
+    
+    if (!txHash) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing transaction hash. Use ?hash=0x... in the URL');
+      return;
+    }
+    
+    console.log(`Testing output for hash: ${txHash}`);
+    
+    testTransactionOutput(txHash, contractAddress)
+      .then(success => {
+        if (success) {
+          res.writeHead(200, {'Content-Type': 'text/plain'});
+          res.end(`Test completed for ${txHash}. Check logs for the tweet preview.`);
+        } else {
+          res.writeHead(400, {'Content-Type': 'text/plain'});
+          res.end(`Failed to process transaction ${txHash}. Check logs for errors.`);
+        }
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
   } else {
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('Art Blocks Sales Bot is running');
@@ -310,6 +364,80 @@ async function sendTweet(message) {
 // Function to send a test tweet
 async function sendTestTweet() {
   return sendTweet(`Art Blocks sales bot is monitoring OpenSea sales for ${CONFIG.CONTRACT_ADDRESSES.length} contracts! (${new Date().toLocaleTimeString()})`);
+}
+
+// Function to process a transaction without sending a tweet
+async function testTransactionOutput(txHash, contractAddress) {
+  try {
+    console.log(`Testing output for transaction: ${txHash}`);
+    
+    // Get transaction details
+    const transaction = await alchemy.core.getTransaction(txHash);
+    if (!transaction || !transaction.to) {
+      console.log('Transaction not found or invalid');
+      return false;
+    }
+    
+    // Get receipt
+    const receipt = await alchemy.core.getTransactionReceipt(txHash);
+    if (!receipt) {
+      console.log('Receipt not found');
+      return false;
+    }
+    
+    // Extract buyer (simplified approach)
+    const buyer = receipt.to || transaction.from;
+    console.log(`Identified buyer: ${buyer}`);
+    
+    // Extract token ID
+    const tokenId = parseInt(transaction.data.slice(74, 138), 16);
+    console.log(`Extracted token ID: ${tokenId}`);
+    
+    // Get project details
+    const details = await getProjectDetails(tokenId, contractAddress);
+    console.log('Project details:', details);
+    
+    // Get price
+    const priceWei = parseInt(transaction.value, 16);
+    const priceEth = priceWei / 1e18;
+    console.log(`Sale price: ${priceEth} ETH`);
+    
+    // Get ETH/USD price
+    const ethPrice = await getEthPrice();
+    const usdPrice = ethPrice ? (priceEth * ethPrice).toFixed(2) : null;
+    
+    // Get buyer info
+    let buyerDisplay = formatAddress(buyer);
+    
+    const ensName = await getEnsName(buyer);
+    if (ensName) {
+      buyerDisplay = ensName;
+    } else {
+      const osName = await getOpenseaUserName(buyer);
+      if (osName) {
+        buyerDisplay = osName;
+      }
+    }
+    
+    // Format tweet (without sending)
+    let tweetText = `${details.projectName} #${details.tokenNumber} by ${details.artistName}`;
+    tweetText += `\nsold for ${formatPrice(priceEth)} ETH`;
+    
+    if (usdPrice) {
+      tweetText += ` ($${usdPrice.toLocaleString()})`;
+    }
+    
+    tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
+    
+    console.log('\n--- TWEET PREVIEW ---\n');
+    console.log(tweetText);
+    console.log('\n---------------------\n');
+    
+    return true;
+  } catch (error) {
+    console.error('Error in test transaction:', error);
+    return false;
+  }
 }
 
 // Function to format price with commas for thousands
