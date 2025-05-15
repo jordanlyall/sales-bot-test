@@ -87,3 +87,95 @@ try {
 } catch (error) {
   console.error('Error initializing Alchemy client:', error);
 }
+
+
+// Add after Alchemy initialization
+// Art Blocks contract address
+const CONTRACT_ADDRESS = '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270';
+const MIN_PRICE_ETH = 0.5;
+
+// Set up marketplace mapping
+const marketplaces = {
+  '0x7f268357a8c2552623316e2562d90e642bb538e5': { name: 'OpenSea', url: 'https://opensea.io/assets/ethereum/0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270/' },
+  '0x59728544b08ab483533076417fbbb2fd0b17ce3a': { name: 'LooksRare', url: 'https://looksrare.org/collections/0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270/' },
+};
+
+// Simple function to get project details from token ID
+function getProjectDetails(tokenId) {
+  const projectId = Math.floor(tokenId / 1000000);
+  const tokenNumber = tokenId % 1000000;
+  return {
+    projectId,
+    tokenNumber,
+    projectName: `Art Blocks #${projectId}`,
+    isCurated: true // We'll assume curated for now
+  };
+}
+
+// Function to monitor sales
+async function monitorSales() {
+  console.log('Starting to monitor Art Blocks Curated sales...');
+  
+  try {
+    // Set up Alchemy monitor if available
+    if (alchemy) {
+      console.log('Setting up Alchemy websocket listener...');
+      alchemy.ws.on(
+        {
+          method: 'alchemy_pendingTransactions',
+          fromAddress: Object.keys(marketplaces),
+          toAddress: CONTRACT_ADDRESS,
+        },
+        async (tx) => {
+          try {
+            console.log(`Processing transaction: ${tx.hash}`);
+            
+            // Get transaction details
+            const transaction = await alchemy.core.getTransaction(tx.hash);
+            if (!transaction || !transaction.to) return;
+            
+            // Extract token ID
+            const tokenId = parseInt(transaction.data.slice(74, 138), 16);
+            const details = getProjectDetails(tokenId);
+            
+            // Skip if not curated (you can add logic here later)
+            if (!details.isCurated) return;
+            
+            // Get price in ETH
+            const priceWei = parseInt(transaction.value, 16);
+            const priceEth = priceWei / 1e18;
+            
+            // Skip if below minimum price
+            if (priceEth < MIN_PRICE_ETH) return;
+            
+            // Get marketplace info
+            const marketplace = marketplaces[transaction.from.toLowerCase()];
+            if (!marketplace) return;
+            
+            // Format and send tweet
+            const tweetText = `🔄 Art Blocks Curated Sale 🔄\n\n${details.projectName} #${details.tokenNumber} sold for ${priceEth.toFixed(2)} ETH\n\n${marketplace.url}${tokenId}`;
+            
+            await twitterClient.v2.tweet(tweetText);
+            console.log(`Tweeted about sale: ${tweetText}`);
+          } catch (error) {
+            console.error('Error processing transaction:', error);
+          }
+        }
+      );
+      console.log('Alchemy listener set up successfully');
+    }
+    
+    console.log('Bot setup complete and running...');
+  } catch (error) {
+    console.error('Error in monitorSales function:', error);
+  }
+}
+
+// Call at the end of the file
+// Start monitoring with error handling
+try {
+  monitorSales();
+  console.log('Monitor sales function called');
+} catch (error) {
+  console.error('Error starting monitor:', error);
+}
