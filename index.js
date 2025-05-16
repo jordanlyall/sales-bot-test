@@ -10,7 +10,6 @@
 const http = require('http');
 const { TwitterApi } = require('twitter-api-v2');
 const { Alchemy, Network } = require('alchemy-sdk');
-const { ethers } = require('ethers');  // Make sure ethers.js is installed
 const retry = require('async-retry');
 const axios = require('axios');
 require('dotenv').config();
@@ -2755,7 +2754,7 @@ class ArtBlocksSalesBot {
   }
 
   async monitorSales() {
-    console.log('Starting comprehensive blockchain monitoring for Art Blocks sales...');
+    console.log('Starting enhanced blockchain monitoring for Art Blocks sales...');
     
     try {
       if (!this.apiServices.alchemy) {
@@ -2765,141 +2764,70 @@ class ArtBlocksSalesBot {
       
       console.log('Setting up robust blockchain monitoring...');
       
-      // 1. DIRECT TRANSFER EVENT MONITORING - The most reliable approach
-      // This listens for all ERC-721 Transfer events on any Art Blocks contract
-      // It will catch ALL transfers regardless of marketplace
-      const provider = this.apiServices.alchemy.core.provider;
-      
-      // The Transfer event signature
-      const transferEventSignature = "Transfer(address,address,uint256)";
-      const transferTopic = ethers.utils.id(transferEventSignature);
-      
-      // Create log filter for ALL Art Blocks contracts
-      const filter = {
-        topics: [transferTopic],
-        address: this.config.CONTRACT_ADDRESSES
-      };
-      
-      // Log setup details
-      console.log(`Setting up ERC-721 Transfer event filter for ${this.config.CONTRACT_ADDRESSES.length} contracts`);
-      console.log(`Transfer event topic: ${transferTopic}`);
-      
-      // Set up the event listener
-      provider.on(filter, async (log) => {
-        try {
-          // Skip if we've already processed this transaction
-          if (this.txProcessor.processedTransactions.has(log.transactionHash)) {
-            console.log(`Already processed transaction ${log.transactionHash}, skipping`);
-            return;
-          }
-          
-          // Mark as processed to avoid duplicates
-          this.txProcessor.processedTransactions.add(log.transactionHash);
-          
-          console.log(`DETECTED TRANSFER EVENT: ${JSON.stringify(log)}`);
-          
-          // Extract contract address
-          const contractAddress = log.address.toLowerCase();
-          
-          // Extract the token ID (last topic contains the tokenId)
-          const tokenId = parseInt(log.topics[3], 16);
-          
-          // Extract sender and recipient (from topics)
-          const from = '0x' + log.topics[1].substring(26);
-          const to = '0x' + log.topics[2].substring(26);
-          
-          console.log(`Transfer detected: Contract ${contractAddress}, TokenID ${tokenId}, From ${from}, To ${to}`);
-          
-          // Now we need to check if this is a SALE (not just a transfer)
-          // We'll check the transaction for any ETH value or token transfers
-          
-          // Get the full transaction
-          const tx = await provider.getTransaction(log.transactionHash);
-          const receipt = await provider.getTransactionReceipt(log.transactionHash);
-          
-          if (!tx || !receipt) {
-            console.log('Transaction or receipt not found, skipping');
-            return;
-          }
-          
-          // Check for ETH value
-          const priceEth = await this.txProcessor.extractSalePrice(tx, receipt);
-          
-          if (priceEth >= this.config.MIN_PRICE_ETH) {
-            console.log(`CONFIRMED SALE: ${tokenId} for ${priceEth} ETH`);
-            
-            // Process the sale
-            const sale = {
-              hash: log.transactionHash,
-              contractAddress: contractAddress,
-              tokenId: tokenId,
-              priceEth: priceEth,
-              from: from,
-              to: to
-            };
-            
-            // Log a very noticeable message in the console
-            console.log('=========================================');
-            console.log(`💰 SALE DETECTED: ${contractAddress}/${tokenId} for ${priceEth} ETH`);
-            console.log('=========================================');
-            
-            // Process using our existing pipeline
-            await this.txProcessor.processTransferEvent(sale);
-          } else {
-            console.log(`Transfer doesn't appear to be a sale (price: ${priceEth} ETH), skipping`);
-          }
-        } catch (error) {
-          console.error('Error processing transfer event:', error);
-        }
+      // 1. Remove the OpenSea filter to catch ALL transactions to Art Blocks contracts
+      this.config.CONTRACT_ADDRESSES.forEach(contractAddress => {
+        console.log(`Setting up listener for contract: ${contractAddress}`);
+        
+        // Set up subscription without the fromAddress filter to catch ALL transfers
+        this.apiServices.alchemy.ws.on(
+          {
+            method: 'alchemy_pendingTransactions',
+            // No fromAddress filter - catch transactions from all sources
+            toAddress: contractAddress,
+          },
+          (tx) => this.txProcessor.processTransaction(tx, contractAddress)
+        );
       });
       
-      console.log('Transfer event monitoring set up successfully!');
+      console.log('Enhanced blockchain monitoring set up successfully!');
       this.txProcessor.hasDirectEventMonitoring = true;
       
       // 2. Additionally, continue with OpenSea monitoring as a backup
       this.openSeaProcessor.startEventPolling();
       
-      // 3. Add periodic backfill monitoring to catch any missed sales
+      // 3. Add periodic checking of recent blocks to catch any missed transactions
       const backfillIntervalId = setInterval(async () => {
-        if (VERBOSE_LOGGING) {
-          console.log('Running periodic backfill check for recent sales...');
-        }
-        
         try {
-          // Scan the last 1000 blocks for Transfer events we might have missed
-          const latestBlock = await provider.getBlockNumber();
-          const fromBlock = latestBlock - 1000; // ~4 hours of history
+          if (VERBOSE_LOGGING) {
+            console.log('Running periodic check for recent NFT transfers...');
+          }
           
-          console.log(`Scanning blocks ${fromBlock} to ${latestBlock} for missed transfers...`);
-          
-          // Same filter as above but with block range
-          const pastFilter = {
-            topics: [transferTopic],
-            address: this.config.CONTRACT_ADDRESSES,
-            fromBlock: fromBlock,
-            toBlock: latestBlock
-          };
-          
-          const events = await provider.getLogs(pastFilter);
-          console.log(`Found ${events.length} past transfer events to check`);
-          
-          // Process each event (we can deduplicate based on transaction hash)
-          for (const event of events) {
-            const txHash = event.transactionHash;
-            
-            // Skip if we've already processed this transaction
-            if (this.txProcessor.processedTransactions.has(txHash)) {
-              continue;
+          // For each contract, check recent transfers
+          for (const contractAddress of this.config.CONTRACT_ADDRESSES) {
+            try {
+              console.log(`Checking recent transfers for contract ${contractAddress}...`);
+              
+              // Get recent transfers using Alchemy's getNFTTransfers
+              const transfersResponse = await this.apiServices.alchemy.core.getAssetTransfers({
+                fromBlock: "0x" + (await this.apiServices.alchemy.core.getBlockNumber() - 1000).toString(16),
+                toBlock: "latest",
+                contractAddresses: [contractAddress],
+                category: ["erc721"]
+              });
+              
+              const transfers = transfersResponse.transfers || [];
+              
+              console.log(`Found ${transfers.length} recent transfers for ${contractAddress}`);
+              
+              // Process each transfer (with rate limiting to avoid overloading)
+              for (const transfer of transfers) {
+                // Skip if we've already processed this hash
+                if (this.txProcessor.processedTransactions.has(transfer.hash)) {
+                  continue;
+                }
+                
+                // Create a minimal tx object with the hash
+                const tx = { hash: transfer.hash };
+                
+                // Process using our standard pipeline
+                await this.txProcessor.processTransaction(tx, contractAddress);
+                
+                // Add a small delay between processing transfers
+                await new Promise(resolve => setTimeout(resolve, 500));
+              }
+            } catch (contractError) {
+              console.error(`Error checking transfers for ${contractAddress}:`, contractError);
             }
-            
-            this.txProcessor.processedTransactions.add(txHash);
-            
-            // Create a minimal tx object with the hash
-            const tx = { hash: txHash };
-            const contractAddress = event.address.toLowerCase();
-            
-            // Process using our standard pipeline
-            await this.txProcessor.processTransaction(tx, contractAddress);
           }
         } catch (error) {
           console.error('Error in backfill monitoring:', error);
@@ -2909,63 +2837,59 @@ class ArtBlocksSalesBot {
       this.txProcessor.hasBackfillMonitoring = true;
       this.backfillIntervalId = backfillIntervalId;
       
-      // 4. Run an immediate backfill for recent history (last 6 hours)
-      console.log('Running immediate backfill for recent history...');
-      try {
-        const latestBlock = await provider.getBlockNumber();
-        const fromBlock = latestBlock - 2000; // ~8 hours of history
-        
-        console.log(`Initial scan of blocks ${fromBlock} to ${latestBlock} for recent transfers...`);
-        
-        const pastFilter = {
-          topics: [transferTopic],
-          address: this.config.CONTRACT_ADDRESSES,
-          fromBlock: fromBlock,
-          toBlock: latestBlock
-        };
-        
-        const events = await provider.getLogs(pastFilter);
-        console.log(`Found ${events.length} recent transfer events to check`);
-        
-        // Create a queue of events to process
-        const eventQueue = [...events];
-        
-        // Process events in batches to avoid overloading
-        const processNextBatch = async () => {
-          const batch = eventQueue.splice(0, 5); // Process 5 at a time
+      // 4. Run an immediate check for recent transfers
+      setTimeout(async () => {
+        try {
+          console.log('Running immediate check for recent NFT transfers...');
           
-          if (batch.length === 0) {
-            console.log('Finished processing all recent transfer events');
-            return;
-          }
-          
-          for (const event of batch) {
-            const txHash = event.transactionHash;
-            
-            // Skip if we've already processed this transaction
-            if (this.txProcessor.processedTransactions.has(txHash)) {
-              continue;
+          // Do this in the background after a short delay
+          for (const contractAddress of this.config.CONTRACT_ADDRESSES) {
+            try {
+              console.log(`Checking recent transfers for contract ${contractAddress}...`);
+              
+              // Get recent transfers using Alchemy's getNFTTransfers
+              const transfersResponse = await this.apiServices.alchemy.core.getAssetTransfers({
+                fromBlock: "0x" + (await this.apiServices.alchemy.core.getBlockNumber() - 2000).toString(16),
+                toBlock: "latest",
+                contractAddresses: [contractAddress],
+                category: ["erc721"]
+              });
+              
+              const transfers = transfersResponse.transfers || [];
+              
+              console.log(`Found ${transfers.length} recent transfers for ${contractAddress}`);
+              
+              // Process each transfer (with rate limiting to avoid overloading)
+              let processed = 0;
+              for (const transfer of transfers) {
+                // Limit how many we process initially
+                if (processed >= 10) break;
+                
+                // Skip if we've already processed this hash
+                if (this.txProcessor.processedTransactions.has(transfer.hash)) {
+                  continue;
+                }
+                
+                // Create a minimal tx object with the hash
+                const tx = { hash: transfer.hash };
+                
+                // Process using our standard pipeline
+                await this.txProcessor.processTransaction(tx, contractAddress);
+                processed++;
+                
+                // Add a small delay between processing transfers
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+              
+              console.log(`Processed ${processed} recent transfers for ${contractAddress}`);
+            } catch (contractError) {
+              console.error(`Error checking initial transfers for ${contractAddress}:`, contractError);
             }
-            
-            this.txProcessor.processedTransactions.add(txHash);
-            
-            // Create a minimal tx object with the hash
-            const tx = { hash: txHash };
-            const contractAddress = event.address.toLowerCase();
-            
-            // Process using our standard pipeline
-            await this.txProcessor.processTransaction(tx, contractAddress);
           }
-          
-          // Process next batch after a short delay
-          setTimeout(processNextBatch, 1000);
-        };
-        
-        // Start processing the first batch
-        processNextBatch();
-      } catch (error) {
-        console.error('Error in initial backfill:', error);
-      }
+        } catch (error) {
+          console.error('Error in initial transfer check:', error);
+        }
+      }, 10000); // Run 10 seconds after startup
       
       // 5. Send initial test tweet after a delay
       if (!this.config.DISABLE_TWEETS) {
