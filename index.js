@@ -213,7 +213,7 @@ function updateContractMapping() {
 // Generate OpenSea URLs for all contracts
 const contractMapping = updateContractMapping();
 
-// Function to get ETH to USD conversion rate
+// Function to get ETH to USD conversion rate using Alchemy Prices API
 async function getEthPrice() {
   // Check if we have a cached price that's still valid
   const now = Date.now();
@@ -222,24 +222,35 @@ async function getEthPrice() {
   }
 
   try {
-    // For now, use a dummy price as requested
-    const dummyPrice = 3000; // $3000 per ETH
+    // Use Alchemy Prices API to get current ETH/USD price
+    const response = await axios.get('https://prices.alchemy.com/api/v1/prices/symbols', {
+      params: {
+        symbols: 'ETH',
+        currency: 'USD'
+      },
+      headers: {
+        'Accept': 'application/json',
+        'Alchemy-Aa-Api-Key': process.env.ALCHEMY_API_KEY
+      }
+    });
     
-    // In production, uncomment this to use the real API:
-    // const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
-    // const price = response.data.ethereum.usd;
+    console.log('Alchemy Prices API response:', JSON.stringify(response.data, null, 2));
+    
+    // Extract ETH price from response
+    const ethPrice = response.data.symbols?.ETH?.price || 3000; // Fallback to 3000 if API fails
+    console.log(`Got ETH price from Alchemy API: $${ethPrice}`);
     
     // Update cache
     ethPriceCache = {
-      price: dummyPrice,
+      price: ethPrice,
       timestamp: now
     };
     
-    return dummyPrice;
+    return ethPrice;
   } catch (error) {
-    console.error('Error fetching ETH price:', error);
-    // Return last cached price or null
-    return ethPriceCache.price || null;
+    console.error('Error fetching ETH price from Alchemy:', error.message);
+    // Return last cached price or fallback
+    return ethPriceCache.price || 3000;
   }
 }
 
