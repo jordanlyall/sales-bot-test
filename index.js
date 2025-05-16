@@ -14,6 +14,10 @@ const retry = require('async-retry');
 const axios = require('axios');
 require('dotenv').config();
 
+// Global tracking for recent events and debug features
+global.recentSalesEvents = [];
+const VERBOSE_LOGGING = process.env.VERBOSE_LOGGING === 'true' || false;
+
 // =========================================================
 // CONFIGURATION
 // =========================================================
@@ -52,6 +56,7 @@ class Config {
     this.NFT_METADATA_CACHE_DURATION = 24 * 60 * 60 * 1000; // 1 day
     this.OPENSEA_EVENTS_POLL_INTERVAL = 60000; // 1 minute
     this.OPENSEA_RATE_LIMIT_DELAY = 500; // 500ms between API calls (2 req/s)
+    this.WEBHOOK_URL = process.env.WEBHOOK_URL || null; // For alternative notifications
 
     // Contract name mapping
     this.CONTRACT_NAMES = {
@@ -1374,6 +1379,9 @@ class OpenSeaEventProcessor {
       console.log(tweetText);
       console.log('\n---------------------\n');
       
+      // Track this sale event for the debug dashboard
+      this.trackSaleEvent(details, priceEth, buyerDisplay, usdPrice, details.artBlocksUrl);
+      
       // Queue the tweet
       this.tweets.queueTweet(tweetText);
       
@@ -1382,6 +1390,29 @@ class OpenSeaEventProcessor {
       console.error('Error processing OpenSea sale event:', error);
       return false;
     }
+  }
+  
+  // Helper method to track sales for debug dashboard
+  trackSaleEvent(details, priceEth, buyer, usdPrice, url) {
+    // Add to global tracking
+    global.recentSalesEvents.unshift({
+      timestamp: Date.now(),
+      projectName: details.projectName,
+      artistName: details.artistName,
+      tokenNumber: details.tokenNumber,
+      priceEth: priceEth,
+      usdPrice: usdPrice,
+      buyer: buyer,
+      url: url,
+      aiContext: details.aiContext || null
+    });
+    
+    // Keep only recent events (last 20)
+    if (global.recentSalesEvents.length > 20) {
+      global.recentSalesEvents.pop();
+    }
+    
+    console.log(`Tracked new sale event: ${details.projectName} #${details.tokenNumber}`);
   }
   
   /**
@@ -1394,9 +1425,26 @@ class OpenSeaEventProcessor {
     this.processOpenSeaEvents();
     
     // Set up interval to poll for new events
-    setInterval(() => {
-      this.processOpenSeaEvents();
+    const pollId = setInterval(() => {
+      if (VERBOSE_LOGGING) {
+        console.log(`[${new Date().toISOString()}] Polling OpenSea for new sales...`);
+      }
+      
+      this.processOpenSeaEvents()
+        .then(eventsFound => {
+          if (VERBOSE_LOGGING && eventsFound && eventsFound.length > 0) {
+            console.log(`[${new Date().toISOString()}] Poll complete. Found ${eventsFound.length} new events.`);
+          }
+        })
+        .catch(err => {
+          console.error('Error in OpenSea poll:', err);
+        });
     }, this.config.OPENSEA_EVENTS_POLL_INTERVAL);
+    
+    // Store the interval ID so it can be cleared if needed
+    this.pollIntervalId = pollId;
+    
+    return pollId;
   }
 }
 
@@ -1506,6 +1554,9 @@ class TransactionProcessor {
       console.log(tweetText);
       console.log('\n---------------------\n');
       
+      // Track this sale event for the debug dashboard
+      this.trackSaleEvent(details, priceEth, buyerDisplay, usdPrice, details.artBlocksUrl);
+      
       // Queue the tweet
       this.tweets.queueTweet(tweetText);
       
@@ -1514,6 +1565,30 @@ class TransactionProcessor {
       console.error('Error processing transaction:', error);
       return false;
     }
+  }
+  
+  // Helper method to track sales for debug dashboard
+  trackSaleEvent(details, priceEth, buyer, usdPrice, url) {
+    // Add to global tracking
+    global.recentSalesEvents.unshift({
+      timestamp: Date.now(),
+      projectName: details.projectName,
+      artistName: details.artistName,
+      tokenNumber: details.tokenNumber,
+      priceEth: priceEth,
+      usdPrice: usdPrice,
+      buyer: buyer,
+      url: url,
+      source: 'Blockchain',
+      aiContext: details.aiContext || null
+    });
+    
+    // Keep only recent events (last 20)
+    if (global.recentSalesEvents.length > 20) {
+      global.recentSalesEvents.pop();
+    }
+    
+    console.log(`Tracked new sale event: ${details.projectName} #${details.tokenNumber}`);
   }
 
   async extractSalePrice(transaction, receipt) {
@@ -1749,6 +1824,12 @@ class ServerManager {
         this.handleTriggerOpenSeaEvents(req, res);
       } else if (req.url.startsWith('/api-test')) {
         this.handleApiTest(req, res);
+      } else if (req.url === '/dashboard') {
+        this.handleDebugDashboard(req, res);
+      } else if (req.url === '/api-status') {
+        this.handleAPIStatus(req, res);
+      } else if (req.url.startsWith('/simulate-sale')) {
+        this.handleSimulateSale(req, res);
       } else if (req.url === '/help') {
         this.handleHelp(req, res);
       } else {
@@ -1760,7 +1841,8 @@ class ServerManager {
     const port = process.env.PORT || 3000;
     server.listen(port, () => {
       console.log(`Server running on port ${port}`);
-      console.log(`Try the API test endpoint: /api-test?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&api=test`);
+      console.log(`Debug dashboard available at: http://localhost:${port}/dashboard`);
+      console.log(`API status available at: http://localhost:${port}/api-status`);
     });
 
     return server;
@@ -2189,42 +2271,347 @@ class ServerManager {
     res.end('All caches have been cleared.');
   }
 
-  handleHelp(req, res) {
-    const helpText = `
-Art Blocks Sales Bot - Available Endpoints:
-------------------------------------------
-
-/                   - Home page (bot status)
-/health             - Health check status
-/queue-status       - Check status of tweet queue
-/enable-tweets      - Enable sending real tweets
-/disable-tweets     - Disable tweets (preview only)
-/test-eth-price     - Test ETH price API
-/test-transaction?hash=0x... - Test transaction processing (auto-detects contract)
-/test-output?hash=0x...      - Preview tweet for a transaction (auto-detects contract)
-/test-metadata?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a  - Test metadata retrieval for a specific token
-/debug-metadata?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a - Debug all API responses for a specific token
-/api-test?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&api=all - Test each API individually (opensea, artblocks, alchemy, or all)
-/api-test?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&api=test - Quick API test (doesn't call external APIs)
-/trigger-opensea-events      - Manually trigger OpenSea events check
-/clear-cache        - Clear metadata and price caches
-/reset-rate-limit   - Reset rate limit tracking
-/help               - Show this help page
-
-Example usage:
-/test-output?hash=0x123456...  - No need to specify contract, it will be auto-detected
-/test-metadata?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a - Test metadata for a specific token
-/api-test?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&api=opensea - Test just the OpenSea API for a specific token
-/api-test?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&api=all - Test all APIs for a specific token
-`;
+  // ADDED: Debug Dashboard 
+  handleDebugDashboard(req, res) {
+    // Create a simple HTML page showing recent activity
+    const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Art Blocks Sales Bot - Debug Dashboard</title>
+      <meta http-equiv="refresh" content="30"> <!-- Auto-refresh every 30 seconds -->
+      <style>
+        body { font-family: sans-serif; margin: 20px; background-color: #f5f5f5; }
+        .event { border: 1px solid #ccc; border-radius: 8px; padding: 15px; margin: 15px 0; background-color: white; }
+        .timestamp { color: #777; font-size: 12px; }
+        h1, h2 { color: #333; }
+        .stats { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 20px; }
+        .stat-box { background-color: white; padding: 15px; border-radius: 8px; border: 1px solid #ccc; flex: 1; min-width: 180px; }
+        .price { font-weight: bold; color: #0066cc; }
+        .tools { margin: 20px 0; }
+        .tools a { display: inline-block; margin-right: 15px; background: #0066cc; color: white; padding: 8px 15px; text-decoration: none; border-radius: 4px; }
+        .ai-context { font-style: italic; color: #555; margin-top: 10px; border-left: 3px solid #ccc; padding-left: 10px; }
+        .empty-message { color: #666; font-style: italic; padding: 20px; text-align: center; }
+      </style>
+    </head>
+    <body>
+      <h1>Art Blocks Sales Bot - Debug Dashboard</h1>
+      <p>Last checked: ${new Date().toISOString()} (auto-refreshes every 30 seconds)</p>
+      
+      <div class="stats">
+        <div class="stat-box">
+          <h3>Listeners</h3>
+          <p>OpenSea Polling: ${global.openSeaProcessor?.pollIntervalId ? "✅ Active" : "❌ Inactive"}</p>
+          <p>Blockchain: ${this.api.alchemy ? "✅ Active" : "❌ Inactive"}</p>
+        </div>
+        <div class="stat-box">
+          <h3>Queue</h3>
+          <p>Length: ${this.tweets.tweetQueue.length}</p>
+          <p>Processing: ${this.tweets.isTweetProcessing ? "Yes" : "No"}</p>
+          <p>Tweet Mode: ${this.config.DISABLE_TWEETS ? "Preview Only" : "Live"}</p>
+        </div>
+        <div class="stat-box">
+          <h3>API Status</h3>
+          <p>Twitter: ${this.api.twitter ? "Connected" : "Not Connected"}</p>
+          <p>OpenAI: ${process.env.OPENAI_API_KEY ? "Configured" : "Not Configured"}</p>
+          <p>Last Event: ${new Date(this.api.lastEventTimestamp).toLocaleString()}</p>
+        </div>
+      </div>
+      
+      <div class="tools">
+        <a href="/trigger-opensea-events">Manual OpenSea Check</a>
+        <a href="/simulate-sale?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&price=1.5">Simulate Sale</a>
+        <a href="/api-status">API Status</a>
+        <a href="/help">Help</a>
+      </div>
+      
+      <h2>Recently Detected Sales (${global.recentSalesEvents.length})</h2>
+      <div id="events">
+        ${global.recentSalesEvents.length === 0 ? 
+          '<div class="empty-message">No sales detected yet. Try simulating a sale or checking OpenSea events manually.</div>' :
+          global.recentSalesEvents.map(event => `
+            <div class="event">
+              <div class="timestamp">${new Date(event.timestamp).toLocaleString()}</div>
+              <div><strong>${event.projectName} #${event.tokenNumber}</strong> by ${event.artistName}</div>
+              <div class="price">${event.priceEth} ETH${event.usdPrice ? ` (${this.tweets.formatPrice(event.usdPrice)})` : ''}</div>
+              <div>Buyer: ${event.buyer}</div>
+              <div><a href="${event.url}" target="_blank">View on Art Blocks</a></div>
+              ${event.aiContext ? `<div class="ai-context">🤖 "${event.aiContext}"</div>` : ''}
+            </div>
+          `).join('')}
+      </div>
+    </body>
+    </html>
+    `;
     
-    res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end(helpText);
+    res.writeHead(200, {'Content-Type': 'text/html'});
+    res.end(html);
+  }
+  
+  // ADDED: API Status Endpoint
+  async handleAPIStatus(req, res) {
+    try {
+      const openSeaStatus = await this.testOpenSeaAPI();
+      const alchemyStatus = await this.testAlchemyAPI();
+      
+      const status = {
+        timestamp: new Date().toISOString(),
+        apis: {
+          twitter: !!this.api.twitter,
+          openai: !!process.env.OPENAI_API_KEY,
+          opensea: openSeaStatus,
+          alchemy: alchemyStatus
+        },
+        listeners: {
+          openSeaPollActive: !!global.openSeaProcessor?.pollIntervalId,
+          lastEventTimestamp: new Date(this.api.lastEventTimestamp).toISOString(),
+          alchemyWebsocketsActive: this.api.alchemy && this.api.alchemy.ws ? true : false,
+          contracts: this.config.CONTRACT_ADDRESSES.length
+        },
+        queues: {
+          tweetQueue: this.tweets.tweetQueue.length,
+          processingActive: this.tweets.isTweetProcessing,
+          tweetsEnabled: !this.config.DISABLE_TWEETS,
+          webhookConfigured: !!this.config.WEBHOOK_URL
+        },
+        sales: {
+          recentSalesCount: global.recentSalesEvents.length,
+          lastSaleTimestamp: global.recentSalesEvents.length > 0 ? 
+            new Date(global.recentSalesEvents[0].timestamp).toISOString() : null
+        }
+      };
+      
+      // Decide whether to return JSON or HTML based on the Accept header
+      const acceptHeader = req.headers.accept || '';
+      if (acceptHeader.includes('text/html')) {
+        // Return HTML version
+        const htmlStatus = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Art Blocks Sales Bot - API Status</title>
+          <meta http-equiv="refresh" content="30"> <!-- Auto-refresh every 30 seconds -->
+          <style>
+            body { font-family: sans-serif; margin: 20px; }
+            .status-container { display: flex; flex-wrap: wrap; gap: 20px; }
+            .status-box { border: 1px solid #ccc; border-radius: 8px; padding: 15px; margin: 10px 0; flex: 1; min-width: 200px; }
+            .status-ok { color: green; }
+            .status-error { color: red; }
+            pre { background: #f5f5f5; padding: 10px; border-radius: 5px; overflow: auto; }
+            .tools { margin: 20px 0; }
+            .tools a { display: inline-block; margin-right: 15px; background: #0066cc; color: white; padding: 8px 15px; text-decoration: none; border-radius: 4px; }
+          </style>
+        </head>
+        <body>
+          <h1>Art Blocks Sales Bot - API Status</h1>
+          <p>Last checked: ${status.timestamp} (auto-refreshes every 30 seconds)</p>
+          
+          <div class="tools">
+            <a href="/dashboard">Dashboard</a>
+            <a href="/trigger-opensea-events">Manual OpenSea Check</a>
+            <a href="/help">Help</a>
+          </div>
+          
+          <div class="status-container">
+            <div class="status-box">
+              <h2>APIs</h2>
+              <p>Twitter: <span class="${status.apis.twitter ? 'status-ok' : 'status-error'}">${status.apis.twitter ? '✅ Connected' : '❌ Not Connected'}</span></p>
+              <p>OpenAI: <span class="${status.apis.openai ? 'status-ok' : 'status-error'}">${status.apis.openai ? '✅ Configured' : '❌ Not Configured'}</span></p>
+              <p>OpenSea: <span class="${status.apis.opensea ? 'status-ok' : 'status-error'}">${status.apis.opensea ? '✅ Connected' : '❌ Not Connected'}</span></p>
+              <p>Alchemy: <span class="${status.apis.alchemy ? 'status-ok' : 'status-error'}">${status.apis.alchemy ? '✅ Connected' : '❌ Not Connected'}</span></p>
+            </div>
+            
+            <div class="status-box">
+              <h2>Listeners</h2>
+              <p>OpenSea Polling: <span class="${status.listeners.openSeaPollActive ? 'status-ok' : 'status-error'}">${status.listeners.openSeaPollActive ? '✅ Active' : '❌ Inactive'}</span></p>
+              <p>Alchemy Websockets: <span class="${status.listeners.alchemyWebsocketsActive ? 'status-ok' : 'status-error'}">${status.listeners.alchemyWebsocketsActive ? '✅ Active' : '❌ Inactive'}</span></p>
+              <p>Last Event: ${status.listeners.lastEventTimestamp}</p>
+              <p>Contracts Monitored: ${status.listeners.contracts}</p>
+            </div>
+            
+            <div class="status-box">
+              <h2>Queue</h2>
+              <p>Tweet Queue: ${status.queues.tweetQueue}</p>
+              <p>Processing Active: ${status.queues.processingActive ? 'Yes' : 'No'}</p>
+              <p>Tweets Enabled: <span class="${status.queues.tweetsEnabled ? 'status-ok' : 'status-error'}">${status.queues.tweetsEnabled ? 'Yes' : 'No (Preview Mode)'}</span></p>
+              <p>Webhook Configured: ${status.queues.webhookConfigured ? 'Yes' : 'No'}</p>
+            </div>
+            
+            <div class="status-box">
+              <h2>Sales</h2>
+              <p>Recent Sales: ${status.sales.recentSalesCount}</p>
+              <p>Last Sale: ${status.sales.lastSaleTimestamp || 'None'}</p>
+            </div>
+          </div>
+          
+          <div class="status-box">
+            <h2>Raw JSON</h2>
+            <pre>${JSON.stringify(status, null, 2)}</pre>
+          </div>
+        </body>
+        </html>
+        `;
+        
+        res.writeHead(200, {'Content-Type': 'text/html'});
+        res.end(htmlStatus);
+      } else {
+        // Return JSON by default
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify(status, null, 2));
+      }
+    } catch (error) {
+      console.error('Error generating API status:', error);
+      res.writeHead(500, {'Content-Type': 'text/plain'});
+      res.end('Error generating API status: ' + error.message);
+    }
+  }
+  
+  async testOpenSeaAPI() {
+    try {
+      // Test with a known collection
+      const response = await axios.get(
+        'https://api.opensea.io/api/v2/collections/art-blocks-curated', 
+        { headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY } }
+      );
+      return response.status === 200;
+    } catch (error) {
+      console.error('OpenSea API test failed:', error.message);
+      return false;
+    }
+  }
+
+  async testAlchemyAPI() {
+    try {
+      if (!this.api.alchemy) return false;
+      // Test a simple call
+      const blockNumber = await this.api.alchemy.core.getBlockNumber();
+      return blockNumber > 0;
+    } catch (error) {
+      console.error('Alchemy API test failed:', error.message);
+      return false;
+    }
+  }
+  
+  // ADDED: Sale Simulator endpoint
+  handleSimulateSale(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tokenId = url.searchParams.get('tokenId');
+    const contractAddress = url.searchParams.get('contract') || this.config.CONTRACT_ADDRESSES[0];
+    const priceEth = parseFloat(url.searchParams.get('price') || '1.0');
+    const buyerAddress = url.searchParams.get('buyer') || "0x1234567890123456789012345678901234567890";
+    
+    if (!tokenId) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing tokenId. Use ?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&price=1.0');
+      return;
+    }
+    
+    console.log(`Simulating sale for ${contractAddress}/${tokenId} at ${priceEth} ETH`);
+    
+    // Create a simulated sale event
+    const simulatedEvent = {
+      nft: {
+        contract: contractAddress,
+        identifier: tokenId
+      },
+      payment: {
+        quantity: (BigInt(Math.floor(priceEth * 1e18))).toString() // Convert to wei
+      },
+      winner: {
+        address: buyerAddress
+      }
+    };
+    
+    // Process the simulated event
+    global.openSeaProcessor.processSaleEvent(simulatedEvent)
+      .then(result => {
+        if (result) {
+          res.writeHead(200, {'Content-Type': 'text/html'});
+          res.end(`
+            <html>
+              <head>
+                <meta http-equiv="refresh" content="2;url=/dashboard" />
+                <style>
+                  body { font-family: sans-serif; text-align: center; margin-top: 100px; }
+                </style>
+              </head>
+              <body>
+                <h1>Sale simulation successful!</h1>
+                <p>Redirecting to dashboard in 2 seconds...</p>
+                <p><a href="/dashboard">Click here if not redirected</a></p>
+              </body>
+            </html>
+          `);
+        } else {
+          res.writeHead(400, {'Content-Type': 'text/plain'});
+          res.end('Sale simulation failed to process. Check logs for details.');
+        }
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error simulating sale: ' + err.message);
+      });
   }
 
   handleRoot(req, res) {
-    res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end('Art Blocks Sales Bot is running. Visit /help for available endpoints.');
+    // Check if we should return HTML or plain text
+    const acceptHeader = req.headers.accept || '';
+    if (acceptHeader.includes('text/html')) {
+      // Return HTML version with links to other endpoints
+      const htmlRoot = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Art Blocks Sales Bot</title>
+        <style>
+          body { font-family: sans-serif; margin: 20px; line-height: 1.5; }
+          h1, h2 { color: #333; }
+          .card { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0; }
+          .links { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0; }
+          .link { background: #0066cc; color: white; padding: 10px 15px; text-decoration: none; border-radius: 4px; }
+          .status { font-weight: bold; }
+          .status-ok { color: green; }
+          .status-warning { color: orange; }
+          .status-error { color: red; }
+        </style>
+      </head>
+      <body>
+        <h1>Art Blocks Sales Bot</h1>
+        <div class="card">
+          <h2>Bot Status: <span class="status status-ok">Running</span></h2>
+          <p>The Art Blocks Sales Bot is currently active and monitoring sales.</p>
+          <p>Last checked: ${new Date().toISOString()}</p>
+          <p>Contracts monitored: ${this.config.CONTRACT_ADDRESSES.length}</p>
+          <p>Tweet mode: ${this.config.DISABLE_TWEETS ? '<span class="status status-warning">Preview Only</span>' : '<span class="status status-ok">Live Tweets</span>'}</p>
+          <p>OpenSea polling: ${global.openSeaProcessor?.pollIntervalId ? '<span class="status status-ok">Active</span>' : '<span class="status status-error">Inactive</span>'}</p>
+          <p>Blockchain monitoring: ${this.api.alchemy ? '<span class="status status-ok">Active</span>' : '<span class="status status-error">Inactive</span>'}</p>
+        </div>
+        
+        <div class="links">
+          <a href="/dashboard" class="link">Debug Dashboard</a>
+          <a href="/api-status" class="link">API Status</a>
+          <a href="/simulate-sale?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&price=1.5" class="link">Simulate Sale</a>
+          <a href="/help" class="link">Help</a>
+        </div>
+        
+        <div class="card">
+          <h2>Recent Activity</h2>
+          <p>Recent sales detected: ${global.recentSalesEvents.length}</p>
+          <p>Current queue size: ${this.tweets.tweetQueue.length}</p>
+          <p>Last sale: ${global.recentSalesEvents.length > 0 ? new Date(global.recentSalesEvents[0].timestamp).toLocaleString() : 'None detected yet'}</p>
+          <p><a href="/dashboard">View full dashboard</a></p>
+        </div>
+      </body>
+      </html>
+      `;
+      
+      res.writeHead(200, {'Content-Type': 'text/html'});
+      res.end(htmlRoot);
+    } else {
+      // Return plain text by default
+      res.writeHead(200, {'Content-Type': 'text/plain'});
+      res.end('Art Blocks Sales Bot is running. Last checked: ' + new Date().toISOString() + '. Visit /help for available endpoints or /dashboard for a visual interface.');
+    }
   }
 }
 
