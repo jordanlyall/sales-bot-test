@@ -1083,6 +1083,9 @@ class TweetManager {
     // Add buyer info
     tweetText += `\nto ${buyerDisplay}`;
     
+    // Log AI context status for debugging
+    console.log(`formatSaleTweet called with aiContext: '${details.aiContext || "NONE"}'`);
+    
     // Add AI context if available
     if (details.aiContext) {
       tweetText += `\n\n🤖 "${details.aiContext}"`;
@@ -1108,166 +1111,110 @@ class TweetManager {
     return tweetText;
   }
 
+  // UPDATED: Simplified and more reliable AI context generation
   async generateAIContext(details, projectName, artistName) {
-  try {
-    // Check if OpenAI is configured
-    if (!process.env.OPENAI_API_KEY) {
-      console.log('OpenAI API key not configured, skipping AI context');
-      return null;
-    }
+    try {
+      // Check if OpenAI is configured
+      if (!process.env.OPENAI_API_KEY) {
+        console.log('OpenAI API key not configured, skipping AI context');
+        return "A unique piece from the Art Blocks collection."; // Default fallback
+      }
 
-    // Extract description and collection information
-    let description = details.description || details.fullData?.description || '';
-    let collectionType = '';
-    
-    // Determine collection type (Curated, Factory, Playground, etc.)
-    // This helps avoid mischaracterizing collections
-    const contractAddress = details.contractAddress?.toLowerCase();
-    if (contractAddress) {
-      if (contractAddress === '0xab0000000000aa06f89b268d604a9c1c41524ac6') {
-        collectionType = 'Curated';
-      } else if (contractAddress === '0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270') {
-        // Check the project ID range for the main contract
-        const projectId = details.projectId || Math.floor(details.tokenId / 1000000);
-        if (projectId >= 0 && projectId <= 3) {
-          collectionType = 'Curated';
-        } else if (projectId >= 4 && projectId <= 372) {
-          collectionType = 'Factory/Playground';
+      // Extract basic trait information
+      let traits = [];
+      if (details.fullData) {
+        // Find traits in any of these common locations
+        const possibleTraitLocations = [
+          details.fullData.traits,
+          details.fullData.attributes,
+          details.fullData.features,
+          details.fullData.nft?.traits,
+          details.fullData.metadata?.attributes,
+          details.fullData.rawMetadata?.attributes
+        ];
+        
+        // Use the first non-empty array of traits we find
+        for (const location of possibleTraitLocations) {
+          if (Array.isArray(location) && location.length > 0) {
+            traits = location;
+            console.log(`Found ${traits.length} traits`);
+            break;
+          }
         }
-      } else if (contractAddress === '0x942bc2d3e7a589fe5bd4a5c6ef9727dfd82f5c8a') {
-        collectionType = 'Explorations';
       }
-    }
-    
-    console.log(`Collection type identified: ${collectionType || 'Unknown'}`);
-    
-    // Extract traits with improved logging
-    let traits = [];
-    let traitMap = {}; 
-    
-    // Your existing trait extraction code here
-    if (details.fullData) {
-      // Extract from all possible trait locations
-      // ... [existing trait extraction code] ...
-    }
-    
-    // Process traits into a formatted text and trait map
-    let traitsText = '';
-    let traitsList = [];
-    
-    // Your existing trait processing code here
-    if (Array.isArray(traits) && traits.length > 0) {
-      // ... [process traits into traitsList and traitMap] ...
       
-      // Create formatted text
-      traitsText = traitsList.map(t => `${t.type}: ${t.value}`).join(', ');
-    }
-    
-    // Add artist-specific context if available
-    let artistContext = '';
-    if (artistName) {
-      // Special contexts for known artists
-      if (artistName.toLowerCase() === 'yazid') {
-        artistContext = "Yazid is known for algorithmic compositions exploring visual patterns and movement.";
-      } else if (artistName.toLowerCase() === 'dmitri cherniak' || artistName.toLowerCase() === 'dmitri') {
-        artistContext = "Dmitri Cherniak is renowned for his mastery of algorithmic art and mathematical precision.";
-      } else if (artistName.toLowerCase() === 'snowfro') {
-        artistContext = "Snowfro (Erick Calderon) is the founder of Art Blocks and creator of the iconic Chromie Squiggle.";
-      } else if (artistName.toLowerCase() === 'tyler hobbs') {
-        artistContext = "Tyler Hobbs is celebrated for his Fidenza series and pioneering computational aesthetics.";
+      // Create a simple trait text string
+      let traitsText = '';
+      if (traits.length > 0) {
+        traitsText = traits.map(trait => {
+          const type = trait.trait_type || trait.type || Object.keys(trait)[0];
+          const value = trait.value || trait[trait.trait_type];
+          if (type && value) return `${type}: ${value}`;
+          return '';
+        }).filter(Boolean).join(', ');
       }
-    }
-    
-    // Add collection-specific context
-    let collectionContext = '';
-    if (projectName) {
-      if (projectName.toLowerCase().includes('squiggle')) {
-        collectionContext = "Chromie Squiggle is Art Blocks' genesis project, embodying the essence of generative art.";
-      } else if (projectName.toLowerCase().includes('fidenza')) {
-        collectionContext = "Fidenza revolutionized on-chain art with its complex flow field algorithms.";
-      } else if (projectName.toLowerCase().includes('ringers')) {
-        collectionContext = "Ringers explores the nearly infinite variations of wrapping strings around pegs.";
-      } else if (projectName.toLowerCase() === 'automatism') {
-        collectionContext = "Automatism features algorithmic compositions inspired by subconscious artistic expression.";
+      
+      console.log(`Traits found: ${traitsText || 'None'}`);
+
+      const { OpenAI } = require('openai');
+      const openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+      });
+      
+      // Add collection-specific context
+      let collectionContext = '';
+      if (projectName) {
+        if (projectName.toLowerCase().includes('squiggle')) {
+          collectionContext = "Chromie Squiggle is Art Blocks' genesis project, embodying the essence of generative art.";
+        } else if (projectName.toLowerCase().includes('fidenza')) {
+          collectionContext = "Fidenza revolutionized on-chain art with its complex flow field algorithms.";
+        } else if (projectName.toLowerCase().includes('ringers')) {
+          collectionContext = "Ringers explores the nearly infinite variations of wrapping strings around pegs.";
+        } else if (projectName.toLowerCase() === 'automatism') {
+          collectionContext = "Automatism features algorithmic compositions inspired by subconscious artistic expression.";
+        }
       }
-    }
-
-    const { OpenAI } = require('openai');
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-    
-    // Improved system prompt with more creativity and accuracy
-    const systemPrompt = `You are an art critic and NFT enthusiast who writes engaging, varied commentary about Art Blocks pieces.
-Your responses should feel natural and human-written, not AI-generated.
-Vary your approach between these styles:
-1. Highlight specific visual traits and their artistic impact
-2. Connect the piece to art history or the artist's background
-3. Describe the emotional or aesthetic impact of the work
-4. Note technical innovations or algorithmic techniques
-
-Never mention AI, algorithms, or computational processes in an obvious way.
-Avoid formulaic language like "featuring," "showcasing," or "characterized by."
-If traits are available, mention at least one in a natural, conversational way.
-Do not use the phrases "on-chain" or "generative art" unless absolutely necessary.`;
-
-    // Create a detailed user prompt that encourages varied, interesting descriptions
-    const userPrompt = `
+      
+      // Simplified, reliable prompt
+      const prompt = `
 Project: "${projectName}" by ${artistName}
-Collection Type: ${collectionType || 'Art Blocks'}
-${artistContext}
-${collectionContext}
-${description ? `Description: "${description.substring(0, 300)}"` : ''}
+${collectionContext ? `Project Context: ${collectionContext}` : ''}
 ${traitsText ? `Token Traits: ${traitsText}` : ''}
 
-Write a brief, captivating comment about this specific artwork that feels like it was written by a human art enthusiast.
-- If traits are available, naturally incorporate at least one into your description
-- Vary your tone and focus (technical aspects, aesthetic qualities, artistic significance, etc.)
-- Keep it concise (15-30 words) and conversational
-- Avoid sounding like an AI or using computational language
-- Make it specific to this exact piece, not generic to all Art Blocks works
+Write a brief, interesting comment about this artwork (under 30 words).
+If traits are available, mention at least one specific trait.
+Make it feel like a human observation, not AI-generated.
+Be specific about this exact artwork, not generic to all Art Blocks pieces.
 `;
-    
-    // Add variety to our approach by randomly selecting different models and temperatures
-    const models = ["gpt-4o-mini", "gpt-3.5-turbo"];
-    const selectedModel = models[Math.floor(Math.random() * models.length)];
-    
-    // Vary temperature based on trait availability (more creative when fewer traits)
-    const temperature = traitsList.length > 0 ? 0.7 : 0.85;
-    
-    console.log(`Using model: ${selectedModel} with temperature: ${temperature}`);
-    
-    // Call OpenAI API
-    const response = await openai.chat.completions.create({
-      model: selectedModel,
-      messages: [
-        {role: "system", content: systemPrompt},
-        {role: "user", content: userPrompt}
-      ],
-      max_tokens: 80,
-      temperature: temperature,
-    });
-    
-    // Clean up the response
-    let artContext = response.choices[0].message.content.trim();
-    
-    // Remove quotes if present
-    artContext = artContext.replace(/^["'](.*)["']$/, '$1');
-    
-    // Remove phrases that reveal it as AI
-    artContext = artContext
-      .replace(/as an AI/gi, '')
-      .replace(/AI-generated/gi, '')
-      .replace(/algorithm/gi, 'technique')
-      .replace(/computational/gi, 'artistic');
-    
-    console.log(`Generated art context: ${artContext}`);
-    return artContext;
-  } catch (error) {
-    console.error('OpenAI API error:', error.message);
-    return null;
+      
+      // Use a reliable model with moderate temperature
+      const response = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo", // More reliable than gpt-4o-mini
+        messages: [
+          {role: "system", content: "You write brief, engaging art commentary that highlights unique features of NFT artworks."},
+          {role: "user", content: prompt}
+        ],
+        max_tokens: 60,
+        temperature: 0.7,
+      });
+      
+      // Get response with minimal processing
+      let artContext = response.choices[0].message.content.trim();
+      
+      // Only remove quotes if they're at the beginning and end
+      if (artContext.startsWith('"') && artContext.endsWith('"')) {
+        artContext = artContext.slice(1, -1);
+      }
+      
+      // Log the result and return
+      console.log(`Generated art context: ${artContext}`);
+      return artContext || "A distinctive piece from the Art Blocks collection."; // Fallback if empty
+      
+    } catch (error) {
+      console.error('OpenAI API error:', error.message);
+      return "A distinctive piece from the Art Blocks collection."; // Fallback on error
+    }
   }
-}
   
   // Helper method to recursively search for traits in complex objects
   _findTraitsRecursively(obj, depth = 0) {
@@ -1412,6 +1359,14 @@ class OpenSeaEventProcessor {
         }
       }
       
+      // Generate AI context
+      console.log(`Generating AI context for tweet: ${details.projectName}, Artist: ${details.artistName}`);
+      const aiContext = await this.tweets.generateAIContext(details, details.projectName, details.artistName);
+      console.log(`AI context generated: ${aiContext || 'None'}`);
+      
+      // Add AI context to details object
+      details.aiContext = aiContext;
+      
       // Format tweet
       const tweetText = await this.tweets.formatSaleTweet(details, priceEth, usdPrice, buyerDisplay);
       
@@ -1536,24 +1491,9 @@ class TransactionProcessor {
         }
       }
       
-      // Extract project name and artist for AI context
-      let projectName = details.projectName.replace(/ #\d+$/, '');
-      let artistName = null;
-      
-      // Check if project name contains "by Artist" format
-      const byMatch = projectName.match(/(.+) by (.+?)$/i);
-      if (byMatch && byMatch[1] && byMatch[2]) {
-        // Extract the artist from the project name
-        artistName = byMatch[2].trim();
-        // And simplify the project name
-        projectName = byMatch[1].trim();
-      } else if (details.artistName && !(details.artistName.startsWith('0x') && details.artistName.length === 42)) {
-        artistName = details.artistName;
-      }
-      
-      // Generate AI context directly here, even for regular transactions
-      console.log(`Generating AI context for tweet: ${projectName}, Artist: ${artistName}`);
-      const aiContext = await this.tweets.generateAIContext(details, projectName, artistName);
+      // Generate AI context
+      console.log(`Generating AI context for tweet: ${details.projectName}, Artist: ${details.artistName}`);
+      const aiContext = await this.tweets.generateAIContext(details, details.projectName, details.artistName);
       console.log(`AI context generated: ${aiContext || 'None'}`);
       
       // Add AI context to details object so formatSaleTweet can access it
@@ -1722,29 +1662,17 @@ class TransactionProcessor {
       let aiContext = null;
       if (includeAi) {
         try {
-          // Extract project and artist name like in formatSaleTweet
-          let projectName = details.projectName.replace(/ #\d+$/, '');
-          let artistName = null;
-          
-          // Check if project name contains "by Artist" format
-          const byMatch = projectName.match(/(.+) by (.+?)$/i);
-          if (byMatch && byMatch[1] && byMatch[2]) {
-            // Extract the artist from the project name
-            artistName = byMatch[2].trim();
-            // And simplify the project name
-            projectName = byMatch[1].trim();
-          } else if (details.artistName && !(details.artistName.startsWith('0x') && details.artistName.length === 42)) {
-            artistName = details.artistName;
-          }
-          
-          console.log(`Generating AI context for test output - Project: ${projectName}, Artist: ${artistName}`);
-          aiContext = await this.tweets.generateAIContext(details, projectName, artistName);
+          console.log(`Generating AI context for test output - Project: ${details.projectName}, Artist: ${details.artistName}`);
+          aiContext = await this.tweets.generateAIContext(details, details.projectName, details.artistName);
           console.log(`AI context generated: ${aiContext}`);
         } catch (aiError) {
           console.error('Error generating AI context for test:', aiError);
           aiContext = null;
         }
       }
+      
+      // Add AI context to details object
+      details.aiContext = aiContext;
       
       // Format tweet
       const tweetText = await this.tweets.formatSaleTweet(details, priceEth, usdPrice, buyerDisplay);
@@ -2065,74 +1993,75 @@ class ServerManager {
       });
   }
 
+  // UPDATED: Simplified test-output handler to only show the tweet
   handleTestOutput(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const txHash = url.searchParams.get('hash');
-  const forceRefresh = url.searchParams.get('refresh') === 'true';
-  const includeAi = url.searchParams.get('ai') !== 'false'; // Default is to include AI
-  
-  if (!txHash) {
-    res.writeHead(400, {'Content-Type': 'text/plain'});
-    res.end('Error: Missing transaction hash. Use ?hash=0x... in the URL');
-    return;
-  }
-  
-  console.log(`Testing output for hash: ${txHash}, force refresh: ${forceRefresh}, includeAi: ${includeAi}`);
-  
-  // First get the transaction to determine which contract is involved
-  this.api.alchemy.core.getTransactionReceipt(txHash)
-    .then(receipt => {
-      if (!receipt) {
-        throw new Error('Transaction receipt not found');
-      }
-      
-      // Find any Transfer events from our monitored contracts
-      let foundContract = null;
-      
-      // Normalize our contract addresses for comparison
-      const monitoredAddresses = this.config.CONTRACT_ADDRESSES.map(addr => addr.toLowerCase());
-      
-      // Check logs for events from our contracts
-      for (const log of receipt.logs) {
-        const logAddress = log.address.toLowerCase();
-        if (monitoredAddresses.includes(logAddress)) {
-          foundContract = logAddress;
-          console.log(`Detected relevant contract: ${foundContract}`);
-          break;
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const txHash = url.searchParams.get('hash');
+    const forceRefresh = url.searchParams.get('refresh') === 'true';
+    const includeAi = url.searchParams.get('ai') !== 'false'; // Default is to include AI
+    
+    if (!txHash) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing transaction hash. Use ?hash=0x... in the URL');
+      return;
+    }
+    
+    console.log(`Testing output for hash: ${txHash}, force refresh: ${forceRefresh}, includeAi: ${includeAi}`);
+    
+    // First get the transaction to determine which contract is involved
+    this.api.alchemy.core.getTransactionReceipt(txHash)
+      .then(receipt => {
+        if (!receipt) {
+          throw new Error('Transaction receipt not found');
         }
-      }
-      
-      if (!foundContract) {
-        throw new Error('No events from monitored Art Blocks contracts found in this transaction');
-      }
-      
-      // Clear cache if forced refresh is requested
-      if (forceRefresh) {
-        console.log("Force refresh requested - clearing cache before processing");
-        this.api.clearCaches();
-      }
-      
-      // Now process with the detected contract
-      return this.txProcessor.testTransactionOutput(txHash, foundContract, includeAi);
-    })
-    .then(result => {
-      // Just return a plain text response with only the tweet content
-      if (result.success) {
-        // Get only the tweet content as plain text with no additional metadata
-        const tweetText = result.tweet || "No tweet content available";
         
-        res.writeHead(200, {'Content-Type': 'text/plain'});
-        res.end(tweetText);
-      } else {
-        res.writeHead(400, {'Content-Type': 'text/plain'});
-        res.end("Failed to process transaction: " + (result.error || "Unknown error"));
-      }
-    })
-    .catch(err => {
-      res.writeHead(500, {'Content-Type': 'text/plain'});
-      res.end('Error: ' + err.message);
-    });
-}
+        // Find any Transfer events from our monitored contracts
+        let foundContract = null;
+        
+        // Normalize our contract addresses for comparison
+        const monitoredAddresses = this.config.CONTRACT_ADDRESSES.map(addr => addr.toLowerCase());
+        
+        // Check logs for events from our contracts
+        for (const log of receipt.logs) {
+          const logAddress = log.address.toLowerCase();
+          if (monitoredAddresses.includes(logAddress)) {
+            foundContract = logAddress;
+            console.log(`Detected relevant contract: ${foundContract}`);
+            break;
+          }
+        }
+        
+        if (!foundContract) {
+          throw new Error('No events from monitored Art Blocks contracts found in this transaction');
+        }
+        
+        // Clear cache if forced refresh is requested
+        if (forceRefresh) {
+          console.log("Force refresh requested - clearing cache before processing");
+          this.api.clearCaches();
+        }
+        
+        // Now process with the detected contract
+        return this.txProcessor.testTransactionOutput(txHash, foundContract, includeAi);
+      })
+      .then(result => {
+        // Just return a plain text response with only the tweet content
+        if (result.success) {
+          // Get only the tweet content as plain text with no additional metadata
+          const tweetText = result.tweet || "No tweet content available";
+          
+          res.writeHead(200, {'Content-Type': 'text/plain'});
+          res.end(tweetText);
+        } else {
+          res.writeHead(400, {'Content-Type': 'text/plain'});
+          res.end("Failed to process transaction: " + (result.error || "Unknown error"));
+        }
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
+  }
 
   handleTestMetadata(req, res) {
     const url = new URL(req.url, `http://${req.headers.host}`);
