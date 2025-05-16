@@ -366,80 +366,6 @@ async function sendTestTweet() {
   return sendTweet(`Art Blocks sales bot is monitoring OpenSea sales for ${CONFIG.CONTRACT_ADDRESSES.length} contracts! (${new Date().toLocaleTimeString()})`);
 }
 
-// Function to process a transaction without sending a tweet
-async function testTransactionOutput(txHash, contractAddress) {
-  try {
-    console.log(`Testing output for transaction: ${txHash}`);
-    
-    // Get transaction details
-    const transaction = await alchemy.core.getTransaction(txHash);
-    if (!transaction || !transaction.to) {
-      console.log('Transaction not found or invalid');
-      return false;
-    }
-    
-    // Get receipt
-    const receipt = await alchemy.core.getTransactionReceipt(txHash);
-    if (!receipt) {
-      console.log('Receipt not found');
-      return false;
-    }
-    
-    // Extract buyer (simplified approach)
-    const buyer = receipt.to || transaction.from;
-    console.log(`Identified buyer: ${buyer}`);
-    
-    // Extract token ID
-    const tokenId = parseInt(transaction.data.slice(74, 138), 16);
-    console.log(`Extracted token ID: ${tokenId}`);
-    
-    // Get project details
-    const details = await getProjectDetails(tokenId, contractAddress);
-    console.log('Project details:', details);
-    
-    // Get price
-    const priceWei = parseInt(transaction.value, 16);
-    const priceEth = priceWei / 1e18;
-    console.log(`Sale price: ${priceEth} ETH`);
-    
-    // Get ETH/USD price
-    const ethPrice = await getEthPrice();
-    const usdPrice = ethPrice ? (priceEth * ethPrice).toFixed(2) : null;
-    
-    // Get buyer info
-    let buyerDisplay = formatAddress(buyer);
-    
-    const ensName = await getEnsName(buyer);
-    if (ensName) {
-      buyerDisplay = ensName;
-    } else {
-      const osName = await getOpenseaUserName(buyer);
-      if (osName) {
-        buyerDisplay = osName;
-      }
-    }
-    
-    // Format tweet (without sending)
-    let tweetText = `${details.projectName} #${details.tokenNumber} by ${details.artistName}`;
-    tweetText += `\nsold for ${formatPrice(priceEth)} ETH`;
-    
-    if (usdPrice) {
-      tweetText += ` ($${usdPrice.toLocaleString()})`;
-    }
-    
-    tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
-    
-    console.log('\n--- TWEET PREVIEW ---\n');
-    console.log(tweetText);
-    console.log('\n---------------------\n');
-    
-    return true;
-  } catch (error) {
-    console.error('Error in test transaction:', error);
-    return false;
-  }
-}
-
 // Function to format price with commas for thousands
 function formatPrice(price) {
   return price.toLocaleString('en-US', { 
@@ -448,49 +374,95 @@ function formatPrice(price) {
   });
 }
 
-// Enhanced transaction processing
+// Enhanced transaction processing with proper event parsing
 async function processTransaction(tx, contractAddress) {
   console.log(`Processing transaction for ${contractAddress}: ${tx.hash}`);
   
   try {
     // Get transaction details
     const transaction = await alchemy.core.getTransaction(tx.hash);
-    if (!transaction || !transaction.to) return;
+    if (!transaction || !transaction.to) {
+      console.log('Transaction not found or invalid');
+      return;
+    }
     
-    // Get transaction receipt to find the buyer
+    // Get transaction receipt with logs
     const receipt = await alchemy.core.getTransactionReceipt(tx.hash);
-    if (!receipt) return;
+    if (!receipt) {
+      console.log('Receipt not found');
+      return;
+    }
     
-    // In a real implementation, you'd need to analyze the logs to find the buyer
-    // This is a simplification - using the 'to' address from the receipt as a placeholder
-    // The correct buyer address should be extracted from event logs
-    const buyer = receipt.to || transaction.from;
+    // For debugging, log the full receipt
+    console.log('Transaction receipt logs:', JSON.stringify(receipt.logs, null, 2));
     
-    // Extract token ID from transaction data
-    const tokenId = parseInt(transaction.data.slice(74, 138), 16);
-    const details = await getProjectDetails(tokenId, contractAddress);
+    // Look for Transfer event in the logs (ERC-721 standard)
+    // Transfer event has the format: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+    const transferEvents = receipt.logs.filter(log => {
+      // Check if it's from the contract we're monitoring
+      const isFromMonitoredContract = log.address.toLowerCase() === contractAddress.toLowerCase();
+      
+      // Check if it's a Transfer event (keccak256 hash of Transfer(address,address,uint256))
+      const isTransferEvent = log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+      
+      return isFromMonitoredContract && isTransferEvent;
+    });
     
-    // Get price in ETH
+    if (transferEvents.length === 0) {
+      console.log('No Transfer events found in transaction');
+      return;
+    }
+    
+    // Get the last Transfer event (usually the most relevant one for sales)
+    const transferEvent = transferEvents[transferEvents.length - 1];
+    
+    // Parse the event data
+    // topics[1] = from address (padded to 32 bytes)
+    // topics[2] = to address (padded to 32 bytes)
+    // topics[3] = token ID (as hex)
+    const fromAddress = '0x' + transferEvent.topics[1].slice(26);
+    const toAddress = '0x' + transferEvent.topics[2].slice(26);
+    
+    // Parse tokenId - if it's in topics[3], it's indexed
+    let tokenId;
+    if (transferEvent.topics.length > 3) {
+      // TokenId is indexed in the event
+      tokenId = parseInt(transferEvent.topics[3], 16);
+    } else {
+      // TokenId is in the data field
+      tokenId = parseInt(transferEvent.data, 16);
+    }
+    
+    console.log(`Extracted from event - From: ${fromAddress}, To: ${toAddress}, TokenId: ${tokenId}`);
+    
+    // Get price in ETH from the transaction value
     const priceWei = parseInt(transaction.value, 16);
     const priceEth = priceWei / 1e18;
     
     // Skip if below minimum price
-    if (priceEth < CONFIG.MIN_PRICE_ETH) return;
+    if (priceEth < CONFIG.MIN_PRICE_ETH) {
+      console.log(`Price ${priceEth} ETH is below minimum threshold, skipping`);
+      return;
+    }
+    
+    // Get project details
+    const details = await getProjectDetails(tokenId, contractAddress);
+    console.log('Project details:', details);
     
     // Get ETH/USD price
     const ethPrice = await getEthPrice();
     const usdPrice = ethPrice ? (priceEth * ethPrice).toFixed(2) : null;
     
-    // Get buyer info
-    let buyerDisplay = formatAddress(buyer);
+    // Get buyer info (using toAddress from Transfer event)
+    let buyerDisplay = formatAddress(toAddress);
     
     // Try to get ENS name
-    const ensName = await getEnsName(buyer);
+    const ensName = await getEnsName(toAddress);
     if (ensName) {
       buyerDisplay = ensName;
     } else {
       // Try to get OpenSea username
-      const osName = await getOpenseaUserName(buyer);
+      const osName = await getOpenseaUserName(toAddress);
       if (osName) {
         buyerDisplay = osName;
       }
@@ -510,6 +482,109 @@ async function processTransaction(tx, contractAddress) {
     await sendTweet(tweetText);
   } catch (error) {
     console.error('Error processing transaction:', error);
+  }
+}
+
+// Updated test function with the same event parsing logic
+async function testTransactionOutput(txHash, contractAddress) {
+  try {
+    console.log(`Testing output for transaction: ${txHash}`);
+    
+    // Get transaction details
+    const transaction = await alchemy.core.getTransaction(txHash);
+    if (!transaction || !transaction.to) {
+      console.log('Transaction not found or invalid');
+      return false;
+    }
+    
+    // Get transaction receipt with logs
+    const receipt = await alchemy.core.getTransactionReceipt(txHash);
+    if (!receipt) {
+      console.log('Receipt not found');
+      return false;
+    }
+    
+    // For debugging, log the full receipt
+    console.log('Transaction receipt logs:', JSON.stringify(receipt.logs, null, 2));
+    
+    // Look for Transfer event in the logs
+    const transferEvents = receipt.logs.filter(log => {
+      // Check if it's from the contract we're monitoring
+      const isFromMonitoredContract = log.address.toLowerCase() === contractAddress.toLowerCase();
+      
+      // Check if it's a Transfer event (keccak256 hash of Transfer(address,address,uint256))
+      const isTransferEvent = log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+      
+      return isFromMonitoredContract && isTransferEvent;
+    });
+    
+    if (transferEvents.length === 0) {
+      console.log('No Transfer events found in transaction');
+      return false;
+    }
+    
+    // Get the last Transfer event (usually the most relevant one for sales)
+    const transferEvent = transferEvents[transferEvents.length - 1];
+    
+    // Parse the event data
+    const fromAddress = '0x' + transferEvent.topics[1].slice(26);
+    const toAddress = '0x' + transferEvent.topics[2].slice(26);
+    
+    // Parse tokenId - if it's in topics[3], it's indexed
+    let tokenId;
+    if (transferEvent.topics.length > 3) {
+      tokenId = parseInt(transferEvent.topics[3], 16);
+    } else {
+      tokenId = parseInt(transferEvent.data, 16);
+    }
+    
+    console.log(`Extracted from event - From: ${fromAddress}, To: ${toAddress}, TokenId: ${tokenId}`);
+    
+    // Get price in ETH
+    const priceWei = parseInt(transaction.value, 16);
+    const priceEth = priceWei / 1e18;
+    
+    // Get project details - enhanced to handle larger tokenIds
+    const details = await getProjectDetails(tokenId, contractAddress);
+    console.log('Project details:', details);
+    
+    // Get ETH/USD price
+    const ethPrice = await getEthPrice();
+    const usdPrice = ethPrice ? (priceEth * ethPrice).toFixed(2) : null;
+    
+    // Get buyer info (using toAddress from Transfer event)
+    let buyerDisplay = formatAddress(toAddress);
+    
+    // Try to get ENS name
+    const ensName = await getEnsName(toAddress);
+    if (ensName) {
+      buyerDisplay = ensName;
+    } else {
+      // Try to get OpenSea username
+      const osName = await getOpenseaUserName(toAddress);
+      if (osName) {
+        buyerDisplay = osName;
+      }
+    }
+    
+    // Format tweet
+    let tweetText = `${details.projectName} #${details.tokenNumber} by ${details.artistName}`;
+    tweetText += `\nsold for ${formatPrice(priceEth)} ETH`;
+    
+    if (usdPrice) {
+      tweetText += ` ($${usdPrice.toLocaleString()})`;
+    }
+    
+    tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
+    
+    console.log('\n--- TWEET PREVIEW ---\n');
+    console.log(tweetText);
+    console.log('\n---------------------\n');
+    
+    return true;
+  } catch (error) {
+    console.error('Error in test transaction:', error);
+    return false;
   }
 }
 
