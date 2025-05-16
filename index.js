@@ -2674,46 +2674,36 @@ class ArtBlocksSalesBot {
   }
 
   async monitorSales() {
-    console.log('Starting blockchain monitoring of Art Blocks sales as backup...');
-    
-    try {
-      if (this.apiServices.alchemy) {
-        console.log('Setting up Alchemy websocket listener...');
-        
-        this.config.CONTRACT_ADDRESSES.forEach(contractAddress => {
-          console.log(`Setting up listener for contract: ${contractAddress}`);
-          
-          this.apiServices.alchemy.ws.on(
-            {
-              method: 'alchemy_pendingTransactions',
-              fromAddress: this.config.OPENSEA_ADDRESS,
-              toAddress: contractAddress,
-            },
-            (tx) => this.txProcessor.processTransaction(tx, contractAddress)
-          );
-        });
-        
-        console.log('Alchemy listeners set up successfully');
-      } else {
-        console.error('Alchemy client not initialized, blockchain monitoring disabled');
-      }
+  console.log('Starting blockchain monitoring of Art Blocks sales as backup...');
+  
+  try {
+    if (this.apiServices.alchemy) {
+      console.log('Setting up Alchemy websocket listener...');
       
-      console.log('Blockchain monitoring setup complete...');
+      this.config.CONTRACT_ADDRESSES.forEach(contractAddress => {
+        console.log(`Setting up listener for contract: ${contractAddress}`);
+        
+        // REMOVE THE fromAddress filter to catch ALL transactions to Art Blocks contracts
+        this.apiServices.alchemy.ws.on(
+          {
+            method: 'alchemy_pendingTransactions',
+            // Remove this line: fromAddress: this.config.OPENSEA_ADDRESS,
+            toAddress: contractAddress,
+          },
+          (tx) => this.txProcessor.processTransaction(tx, contractAddress)
+        );
+      });
       
-      // Send initial test tweet after a delay
-      if (!this.config.DISABLE_TWEETS) {
-        console.log(`Waiting ${this.config.INITIAL_STARTUP_DELAY/60000} minutes before sending first tweet...`);
-        setTimeout(async () => {
-          await this.tweets.sendTestTweet();
-        }, this.config.INITIAL_STARTUP_DELAY);
-      } else {
-        console.log('Tweets are disabled. The bot will only preview tweets in the console.');
-        console.log('To enable tweets, use the /enable-tweets endpoint.');
-      }
-    } catch (error) {
-      console.error('Error in monitorSales function:', error);
+      console.log('Alchemy listeners set up successfully');
+    } else {
+      console.error('Alchemy client not initialized, blockchain monitoring disabled');
     }
+    
+    // Rest of your function...
+  } catch (error) {
+    console.error('Error in monitorSales function:', error);
   }
+}
 
   setupHealthChecks() {
     // Send a health check tweet once a day to verify the bot is still running
