@@ -1094,6 +1094,39 @@ class TweetManager {
     
     return tweetText;
   }
+  async generateAIContext(details, projectName, artistName) {
+    try {
+      // Check if OpenAI is configured
+      if (!process.env.OPENAI_API_KEY) {
+        console.log('OpenAI API key not configured, skipping AI context');
+        return null;
+      }
+
+      const { OpenAI } = require('openai');
+      const openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+      });
+      
+      // Generate prompt about the artwork
+      const prompt = `Provide a brief, interesting fact about the Art Blocks NFT "${projectName}" by ${artistName} in 15 words or less.`;
+      
+      // Call OpenAI API
+      const response = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [
+          {role: "system", content: "You are a helpful assistant that provides brief, engaging facts about NFT art."},
+          {role: "user", content: prompt}
+        ],
+        max_tokens: 30,
+        temperature: 0.7,
+      });
+      
+      return response.choices[0].message.content.trim();
+    } catch (error) {
+      console.error('OpenAI API error:', error.message);
+      return null;
+    }
+  }
 }
 
 // =========================================================
