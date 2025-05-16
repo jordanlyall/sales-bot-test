@@ -239,31 +239,66 @@ class ApiServices {
       
       const data = response.data;
       
+      // Handle different OpenSea API response structures - data may be directly in response or under 'nft'
+      const nftData = data.nft || data;
+      
       // Log specific fields we're interested in for debugging
-      console.log(`OpenSea collection name: ${data.collection?.name || 'Not found'}`);
-      console.log(`OpenSea asset name: ${data.name || 'Not found'}`);
-      console.log(`OpenSea token ID: ${data.identifier || data.token_id || 'Not found'}`);
+      console.log(`OpenSea collection name: ${nftData.collection?.name || nftData.collection || 'Not found'}`);
+      console.log(`OpenSea asset name: ${nftData.name || 'Not found'}`);
+      console.log(`OpenSea token ID: ${nftData.identifier || nftData.token_id || 'Not found'}`);
       
       // More thorough collection name extraction
       let projectName = '';
-      if (data.collection && data.collection.name) {
-        projectName = data.collection.name;
-        console.log(`Found collection name in OpenSea data: ${projectName}`);
-      } else if (data.name) {
+      
+      // Method 1: Try to get from collection.name directly
+      if (nftData.collection && typeof nftData.collection === 'object' && nftData.collection.name) {
+        projectName = nftData.collection.name;
+        console.log(`Found collection name in OpenSea data object: ${projectName}`);
+      } 
+      // Method 2: Try to get from collection string (often a slug)
+      else if (nftData.collection && typeof nftData.collection === 'string') {
+        // Convert kebab-case to readable format (e.g., "chromie-squiggle-by-snowfro" to "Chromie Squiggle by Snowfro")
+        projectName = nftData.collection
+          .split('-')
+          .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+          .join(' ')
+          .replace(/By\s/, 'by '); // Fix capitalization in "by"
+        
+        console.log(`Extracted project name from collection slug: ${projectName}`);
+      } 
+      // Method 3: Try to extract from name field
+      else if (nftData.name) {
         // If name follows format "Collection Name #123", extract the collection name
-        const nameMatch = data.name.match(/^(.*?)\s+#\d+$/);
+        const nameMatch = nftData.name.match(/^(.*?)\s+#\d+$/);
         if (nameMatch && nameMatch[1]) {
           projectName = nameMatch[1];
           console.log(`Extracted project name from token name: ${projectName}`);
         } else {
-          projectName = data.name.replace(/ #\d+$/, '');
+          projectName = nftData.name.replace(/ #\d+$/, '');
+          console.log(`Used modified token name: ${projectName}`);
         }
       }
       
       // Extract artist name from traits
       let artistName = null;
-      if (data.traits) {
-        const artistTrait = data.traits.find(
+      
+      // Handle nested creator field
+      if (nftData.creator) {
+        if (typeof nftData.creator === 'string') {
+          artistName = nftData.creator;
+          console.log(`Found artist name in creator string: ${artistName}`);
+        } else if (nftData.creator.user?.username) {
+          artistName = nftData.creator.user.username;
+          console.log(`Found artist name in creator.user.username: ${artistName}`);
+        } else if (nftData.creator.address) {
+          artistName = nftData.creator.address;
+          console.log(`Using creator address as artist: ${artistName}`);
+        }
+      }
+      
+      // Try to extract artist from traits if still missing
+      if (!artistName && nftData.traits) {
+        const artistTrait = nftData.traits.find(
           trait => 
             trait.trait_type?.toLowerCase() === 'artist' || 
             trait.trait_type?.toLowerCase().includes('artist') ||
@@ -273,13 +308,15 @@ class ApiServices {
         
         if (artistTrait?.value) {
           artistName = artistTrait.value;
+          console.log(`Found artist name in traits: ${artistName}`);
         } else {
           // Look through all traits for artist info
-          for (const trait of data.traits) {
+          for (const trait of nftData.traits) {
             if (trait.value && typeof trait.value === 'string' && trait.value.toLowerCase().includes('by ')) {
               const byParts = trait.value.split('by ');
               if (byParts.length > 1) {
                 artistName = byParts[1].trim();
+                console.log(`Extracted artist from 'by' in trait: ${artistName}`);
                 break;
               }
             }
@@ -288,27 +325,31 @@ class ApiServices {
       }
       
       // Try to extract artist from description if still missing
-      if (!artistName && data.description) {
-        const desc = data.description.toLowerCase();
+      if (!artistName && nftData.description) {
+        const desc = nftData.description.toLowerCase();
         const byMatch = desc.match(/by\s+([a-z0-9\s]+)/i);
         if (byMatch && byMatch[1]) {
           artistName = byMatch[1].trim();
+          console.log(`Extracted artist from description: ${artistName}`);
         }
       }
       
-      // If creator field exists, use that as backup for artist name
-      if (!artistName && data.creator) {
-        artistName = data.creator.user?.username || data.creator.address;
-        console.log(`Using creator as artist: ${artistName}`);
+      // Try collection name for artist extraction as a last resort
+      if (!artistName && projectName.toLowerCase().includes('by ')) {
+        const byMatch = projectName.match(/by\s+([a-z0-9\s]+)/i);
+        if (byMatch && byMatch[1]) {
+          artistName = byMatch[1].trim();
+          console.log(`Extracted artist from collection name: ${artistName}`);
+        }
       }
       
       return {
         success: true,
         projectName,
         artistName,
-        description: data.description || '',
-        imageUrl: data.image_url || data.image || null,
-        collection: data.collection?.name || null,
+        description: nftData.description || '',
+        imageUrl: nftData.image_url || nftData.display_image_url || nftData.animation_url || null,
+        collection: typeof nftData.collection === 'string' ? nftData.collection : nftData.collection?.name || null,
         tokenId: tokenId,
         fullData: data
       };
