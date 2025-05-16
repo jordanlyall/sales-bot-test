@@ -140,7 +140,6 @@ const server = http.createServer((req, res) => {
   } else if (req.url.startsWith('/test-transaction')) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const txHash = url.searchParams.get('hash');
-    const contractAddress = url.searchParams.get('contract') || CONFIG.CONTRACT_ADDRESSES[0];
     
     if (!txHash) {
       res.writeHead(400, {'Content-Type': 'text/plain'});
@@ -150,15 +149,45 @@ const server = http.createServer((req, res) => {
     
     console.log(`Manual transaction test received for hash: ${txHash}`);
     
-    // Create a minimal tx object with the hash
-    const testTx = {
-      hash: txHash
-    };
-    
-    processTransaction(testTx, contractAddress)
-      .then(() => {
+    // First get the transaction to determine which contract is involved
+    alchemy.core.getTransactionReceipt(txHash)
+      .then(receipt => {
+        if (!receipt) {
+          throw new Error('Transaction receipt not found');
+        }
+        
+        // Find any Transfer events from our monitored contracts
+        let foundContract = null;
+        
+        // Normalize our contract addresses for comparison
+        const monitoredAddresses = CONFIG.CONTRACT_ADDRESSES.map(addr => addr.toLowerCase());
+        
+        // Check logs for events from our contracts
+        for (const log of receipt.logs) {
+          const logAddress = log.address.toLowerCase();
+          if (monitoredAddresses.includes(logAddress)) {
+            foundContract = logAddress;
+            console.log(`Detected relevant contract: ${foundContract}`);
+            break;
+          }
+        }
+        
+        if (!foundContract) {
+          throw new Error('No events from monitored Art Blocks contracts found in this transaction');
+        }
+        
+        // Create a minimal tx object with the hash
+        const testTx = {
+          hash: txHash
+        };
+        
+        // Now process with the detected contract
+        return processTransaction(testTx, foundContract)
+          .then(() => foundContract); // Return the contract address for the response
+      })
+      .then((contractAddress) => {
         res.writeHead(200, {'Content-Type': 'text/plain'});
-        res.end(`Processing transaction ${txHash} for contract ${contractAddress}. Check logs for results.`);
+        res.end(`Processing transaction ${txHash} for detected contract ${contractAddress}. Check logs for results.`);
       })
       .catch(err => {
         res.writeHead(500, {'Content-Type': 'text/plain'});
@@ -167,7 +196,6 @@ const server = http.createServer((req, res) => {
   } else if (req.url.startsWith('/test-output')) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const txHash = url.searchParams.get('hash');
-    const contractAddress = url.searchParams.get('contract') || CONFIG.CONTRACT_ADDRESSES[0];
     
     if (!txHash) {
       res.writeHead(400, {'Content-Type': 'text/plain'});
@@ -177,7 +205,36 @@ const server = http.createServer((req, res) => {
     
     console.log(`Testing output for hash: ${txHash}`);
     
-    testTransactionOutput(txHash, contractAddress)
+    // First get the transaction to determine which contract is involved
+    alchemy.core.getTransactionReceipt(txHash)
+      .then(receipt => {
+        if (!receipt) {
+          throw new Error('Transaction receipt not found');
+        }
+        
+        // Find any Transfer events from our monitored contracts
+        let foundContract = null;
+        
+        // Normalize our contract addresses for comparison
+        const monitoredAddresses = CONFIG.CONTRACT_ADDRESSES.map(addr => addr.toLowerCase());
+        
+        // Check logs for events from our contracts
+        for (const log of receipt.logs) {
+          const logAddress = log.address.toLowerCase();
+          if (monitoredAddresses.includes(logAddress)) {
+            foundContract = logAddress;
+            console.log(`Detected relevant contract: ${foundContract}`);
+            break;
+          }
+        }
+        
+        if (!foundContract) {
+          throw new Error('No events from monitored Art Blocks contracts found in this transaction');
+        }
+        
+        // Now process with the detected contract
+        return testTransactionOutput(txHash, foundContract);
+      })
       .then(success => {
         if (success) {
           res.writeHead(200, {'Content-Type': 'text/plain'});
@@ -222,9 +279,32 @@ const server = http.createServer((req, res) => {
     
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('All caches have been cleared.');
-  } else {
+  } else if (req.url === '/help') {
+    // Create a help page with available endpoints
+    const helpText = `
+Art Blocks Sales Bot - Available Endpoints:
+------------------------------------------
+
+/                   - Home page (bot status)
+/health             - Health check status
+/queue-status       - Check status of tweet queue
+/enable-tweets      - Enable sending real tweets
+/disable-tweets     - Disable tweets (preview only)
+/test-eth-price     - Test ETH price API
+/test-transaction?hash=0x... - Test transaction processing (auto-detects contract)
+/test-output?hash=0x...      - Preview tweet for a transaction (auto-detects contract)
+/test-metadata?tokenId=1506  - Test metadata retrieval for a specific token
+/clear-cache        - Clear metadata and price caches
+/reset-rate-limit   - Reset rate limit tracking
+/help               - Show this help page
+
+Example usage:
+/test-output?hash=0x123456...  - No need to specify contract, it will be auto-detected
+/test-metadata?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a - Test metadata for a specific token
+`;
+    
     res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end('Art Blocks Sales Bot is running');
+    res.end(helpText);
   }
 });
 
@@ -706,14 +786,14 @@ async function processTransaction(tx, contractAddress) {
     const transaction = await alchemy.core.getTransaction(tx.hash);
     if (!transaction || !transaction.to) {
       console.log('Transaction not found or invalid');
-      return;
+      return false;
     }
     
     // Get transaction receipt with logs
     const receipt = await alchemy.core.getTransactionReceipt(tx.hash);
     if (!receipt) {
       console.log('Receipt not found');
-      return;
+      return false;
     }
     
     // For debugging, log transaction details
@@ -850,7 +930,7 @@ async function processTransaction(tx, contractAddress) {
     // Skip if below minimum price or zero
     if (priceEth < CONFIG.MIN_PRICE_ETH || priceEth === 0) {
       console.log(`Price ${priceEth} ETH is below minimum threshold or zero, skipping`);
-      return;
+      return false;
     }
     
     // Get project details
@@ -890,8 +970,12 @@ async function processTransaction(tx, contractAddress) {
     
     // Add tweet to queue instead of sending immediately
     queueTweet(tweetText);
+    
+    // Return success
+    return true;
   } catch (error) {
     console.error('Error processing transaction:', error);
+    return false;
   }
 }
 
