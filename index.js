@@ -2074,112 +2074,73 @@ class ServerManager {
   }
 
   handleTestOutput(req, res) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const txHash = url.searchParams.get('hash');
-    const forceRefresh = url.searchParams.get('refresh') === 'true';
-    const includeAi = url.searchParams.get('ai') !== 'false'; // Default is to include AI
-    
-    if (!txHash) {
-      res.writeHead(400, {'Content-Type': 'text/plain'});
-      res.end('Error: Missing transaction hash. Use ?hash=0x... in the URL');
-      return;
-    }
-    
-    console.log(`Testing output for hash: ${txHash}, force refresh: ${forceRefresh}, includeAi: ${includeAi}`);
-    
-    // First get the transaction to determine which contract is involved
-    this.api.alchemy.core.getTransactionReceipt(txHash)
-      .then(receipt => {
-        if (!receipt) {
-          throw new Error('Transaction receipt not found');
-        }
-        
-        // Find any Transfer events from our monitored contracts
-        let foundContract = null;
-        
-        // Normalize our contract addresses for comparison
-        const monitoredAddresses = this.config.CONTRACT_ADDRESSES.map(addr => addr.toLowerCase());
-        
-        // Check logs for events from our contracts
-        for (const log of receipt.logs) {
-          const logAddress = log.address.toLowerCase();
-          if (monitoredAddresses.includes(logAddress)) {
-            foundContract = logAddress;
-            console.log(`Detected relevant contract: ${foundContract}`);
-            break;
-          }
-        }
-        
-        if (!foundContract) {
-          throw new Error('No events from monitored Art Blocks contracts found in this transaction');
-        }
-        
-        // Clear cache if forced refresh is requested
-        if (forceRefresh) {
-          console.log("Force refresh requested - clearing cache before processing");
-          this.api.clearCaches();
-        }
-        
-        // Now process with the detected contract
-        return this.txProcessor.testTransactionOutput(txHash, foundContract, includeAi);
-      })
-      .then(result => {
-        // Just return a plain text response
-        if (result.success) {
-          // Get the tweet content as plain text
-          const tweetText = result.tweet || "No tweet content available";
-          
-          // Add metadata as simple text
-          let response = "TWEET PREVIEW:\n\n" + tweetText + "\n\n";
-          response += "METADATA:\n";
-          
-          if (result.metadata) {
-            response += "Contract: " + result.metadata.contract + "\n";
-            response += "Token ID: " + result.metadata.tokenId + "\n";
-            response += "Project: " + result.metadata.projectName + "\n";
-            response += "Artist: " + result.metadata.artistName + "\n";
-            response += "Token #: " + result.metadata.tokenNumber + "\n";
-            
-            // Format price with USD if available
-            response += "Price: " + result.metadata.priceEth + " ETH";
-            if (result.metadata.priceUsd) {
-              response += " ($" + this.tweets.formatPrice(result.metadata.priceUsd) + ")";
-            }
-            response += "\n";
-            
-            response += "Buyer: " + result.metadata.buyer + "\n";
-            response += "From: " + result.metadata.from + "\n";
-            response += "To: " + result.metadata.to + "\n";
-            response += "URL: " + result.metadata.url + "\n";
-            
-            // Add AI context if available
-            if (result.metadata.aiContext) {
-              response += "AI Context: " + result.metadata.aiContext + "\n";
-            }
-          }
-          
-          // Add links to different test modes
-          response += "\nTo refresh metadata: " + req.url + "&refresh=true";
-          
-          // Add option to test with/without AI
-          if (includeAi) {
-            response += "\nTo test without AI: " + req.url + "&ai=false";
-          } else {
-            response += "\nTo test with AI: " + req.url.replace('&ai=false', '');
-          }
-          
-          res.writeHead(200, {'Content-Type': 'text/plain'});
-          res.end(response);
-        } else {
-          res.writeHead(400, {'Content-Type': 'text/plain'});
-          res.end("Failed to process transaction: " + (result.error || "Unknown error"));
-        }
-      })
-      .catch(err => {
-        res.writeHead(500, {'Content-Type': 'text/plain'});
-        res.end('Error: ' + err.message);
-      });
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const txHash = url.searchParams.get('hash');
+  const forceRefresh = url.searchParams.get('refresh') === 'true';
+  const includeAi = url.searchParams.get('ai') !== 'false'; // Default is to include AI
+  
+  if (!txHash) {
+    res.writeHead(400, {'Content-Type': 'text/plain'});
+    res.end('Error: Missing transaction hash. Use ?hash=0x... in the URL');
+    return;
   }
+  
+  console.log(`Testing output for hash: ${txHash}, force refresh: ${forceRefresh}, includeAi: ${includeAi}`);
+  
+  // First get the transaction to determine which contract is involved
+  this.api.alchemy.core.getTransactionReceipt(txHash)
+    .then(receipt => {
+      if (!receipt) {
+        throw new Error('Transaction receipt not found');
+      }
+      
+      // Find any Transfer events from our monitored contracts
+      let foundContract = null;
+      
+      // Normalize our contract addresses for comparison
+      const monitoredAddresses = this.config.CONTRACT_ADDRESSES.map(addr => addr.toLowerCase());
+      
+      // Check logs for events from our contracts
+      for (const log of receipt.logs) {
+        const logAddress = log.address.toLowerCase();
+        if (monitoredAddresses.includes(logAddress)) {
+          foundContract = logAddress;
+          console.log(`Detected relevant contract: ${foundContract}`);
+          break;
+        }
+      }
+      
+      if (!foundContract) {
+        throw new Error('No events from monitored Art Blocks contracts found in this transaction');
+      }
+      
+      // Clear cache if forced refresh is requested
+      if (forceRefresh) {
+        console.log("Force refresh requested - clearing cache before processing");
+        this.api.clearCaches();
+      }
+      
+      // Now process with the detected contract
+      return this.txProcessor.testTransactionOutput(txHash, foundContract, includeAi);
+    })
+    .then(result => {
+      // Just return a plain text response with only the tweet content
+      if (result.success) {
+        // Get only the tweet content as plain text with no additional metadata
+        const tweetText = result.tweet || "No tweet content available";
+        
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end(tweetText);
+      } else {
+        res.writeHead(400, {'Content-Type': 'text/plain'});
+        res.end("Failed to process transaction: " + (result.error || "Unknown error"));
+      }
+    })
+    .catch(err => {
+      res.writeHead(500, {'Content-Type': 'text/plain'});
+      res.end('Error: ' + err.message);
+    });
+}
 
   handleTestMetadata(req, res) {
     const url = new URL(req.url, `http://${req.headers.host}`);
