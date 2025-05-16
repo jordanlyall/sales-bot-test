@@ -1003,21 +1003,44 @@ class TweetManager {
   }
 
   async formatSaleTweet(details, priceEth, usdPrice, buyerDisplay) {
-    // Make sure the project name doesn't already contain the token number
-    const projectName = details.projectName.replace(/ #\d+$/, '');
+    // Clean up the project name - remove any "by Artist" suffix if artist name is already provided
+    let projectName = details.projectName.replace(/ #\d+$/, '');
+    
+    // Remove redundant artist mentions in project name
+    if (details.artistName && projectName.toLowerCase().includes(' by ' + details.artistName.toLowerCase())) {
+      projectName = projectName.replace(new RegExp(` by ${details.artistName}`, 'i'), '');
+      console.log(`Removed redundant artist name from project name: ${projectName}`);
+    } else if (details.artistName && projectName.toLowerCase().includes(' by ')) {
+      // Generic "by" handling - might need to clean up
+      projectName = projectName.replace(/ by .+$/i, '');
+      console.log(`Removed generic "by..." from project name: ${projectName}`);
+    }
+    
+    // Make sure we're not using an ETH address as artist name
+    let artistName = details.artistName;
+    if (artistName && artistName.startsWith('0x') && artistName.length === 42) {
+      // This looks like an ETH address, try to get a better artist name
+      if (projectName.toLowerCase().includes(' by ')) {
+        const byMatch = projectName.match(/ by ([^#]+)$/i);
+        if (byMatch && byMatch[1]) {
+          artistName = byMatch[1].trim();
+          console.log(`Extracted better artist name from project name: ${artistName}`);
+        }
+      }
+    }
     
     // For Art Blocks tokens, the tokenNumber field might have the full ID
     // We want just the edition number part (the last 6 digits)
     const tokenNumber = details.tokenNumber % 1000000 || details.tokenNumber;
     
     // This is the line that needs to be properly included in the output
-    let tweetText = `${projectName} #${tokenNumber} by ${details.artistName}\n`;
+    let tweetText = `${projectName} #${tokenNumber} by ${artistName}\n`;
     
     // Add price info
     tweetText += `sold for ${this.formatPrice(priceEth)} ETH`;
     
     if (usdPrice) {
-      tweetText += ` ($${this.formatPrice(usdPrice)})`;
+      tweetText += ` (${this.formatPrice(usdPrice)})`;
     }
     
     // Add buyer info and URL
@@ -1025,8 +1048,8 @@ class TweetManager {
     
     // Debug output to verify the tweet format
     console.log('\n--- FORMATTED TWEET ---\n');
-    console.log(`${projectName} #${tokenNumber} by ${details.artistName}`);
-    console.log(`sold for ${this.formatPrice(priceEth)} ETH${usdPrice ? ` ($${this.formatPrice(usdPrice)})` : ''}`);
+    console.log(`${projectName} #${tokenNumber} by ${artistName}`);
+    console.log(`sold for ${this.formatPrice(priceEth)} ETH${usdPrice ? ` (${this.formatPrice(usdPrice)})` : ''}`);
     console.log(`to ${buyerDisplay}`);
     console.log();
     console.log(details.artBlocksUrl);
