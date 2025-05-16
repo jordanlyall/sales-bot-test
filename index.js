@@ -235,9 +235,24 @@ class ApiServices {
       
       const data = response.data;
       
-      // Extract project name
-      let projectName = data.name || data.collection?.name || '';
-      projectName = projectName.replace(/ #\d+$/, ''); // Remove token number
+      // Log raw data for debugging
+      console.log(`OpenSea collection name: ${data.collection?.name || 'Not found'}`);
+      console.log(`OpenSea asset name: ${data.name || 'Not found'}`);
+      
+      // Extract project name from NFT name (more accurate source)
+      let projectName = '';
+      if (data.name) {
+        // If name follows format "Collection Name #123", extract the collection name
+        const nameMatch = data.name.match(/^(.*?)\s+#\d+$/);
+        if (nameMatch && nameMatch[1]) {
+          projectName = nameMatch[1];
+          console.log(`Extracted project name from token name: ${projectName}`);
+        } else {
+          projectName = data.name.replace(/ #\d+$/, '');
+        }
+      } else if (data.collection?.name) {
+        projectName = data.collection.name;
+      }
       
       // Extract artist name from traits
       let artistName = null;
@@ -273,6 +288,12 @@ class ApiServices {
         if (byMatch && byMatch[1]) {
           artistName = byMatch[1].trim();
         }
+      }
+      
+      // If creator field exists, use that as backup for artist name
+      if (!artistName && data.creator) {
+        artistName = data.creator.user?.username || data.creator.address;
+        console.log(`Using creator as artist: ${artistName}`);
       }
       
       return {
@@ -529,9 +550,12 @@ class MetadataManager {
       return this.api.tokenMetadataCache[cacheKey].data;
     }
     
+    console.log(`Getting project details for token ${tokenId} (contract: ${contractAddress})`);
+    
     // Calculate project ID and token number for fallback
     const projectId = Math.floor(tokenId / 1000000);
     const tokenNumber = tokenId % 1000000;
+    console.log(`Token breakdown: Project #${projectId}, Token #${tokenNumber}`);
     
     let projectName = '';
     let artistName = '';
@@ -545,10 +569,16 @@ class MetadataManager {
       artistName = openSeaData.artistName || '';
       description = openSeaData.description || '';
       console.log(`OpenSea API returned - Project: ${projectName}, Artist: ${artistName}`);
+      
+      // Log full token name for debugging
+      if (openSeaData.fullData?.name) {
+        console.log(`OpenSea full token name: ${openSeaData.fullData.name}`);
+      }
     }
     
-    // Try Art Blocks API next for artist information if still missing
-    if (!artistName || !projectName) {
+    // Only try Art Blocks API if OpenSea didn't provide complete data
+    // This prioritizes OpenSea data when available
+    if (!projectName || !artistName) {
       const artBlocksData = await this.api.getArtBlocksTokenInfo(tokenId, normalizedAddress);
       
       if (artBlocksData && artBlocksData.success) {
@@ -557,6 +587,8 @@ class MetadataManager {
         if (!description) description = artBlocksData.description || '';
         console.log(`Art Blocks API returned - Project: ${projectName}, Artist: ${artistName}`);
       }
+    } else {
+      console.log(`Using OpenSea metadata, skipping Art Blocks API call`);
     }
     
     // Try Alchemy as a final fallback
@@ -815,14 +847,31 @@ class TweetManager {
     // Make sure the project name doesn't already contain the token number
     const projectName = details.projectName.replace(/ #\d+$/, '');
     
-    let tweetText = `${projectName} #${details.tokenNumber} by ${details.artistName}`;
-    tweetText += `\nsold for ${this.formatPrice(priceEth)} ETH`;
+    // For Art Blocks tokens, the tokenNumber field might have the full ID
+    // We want just the edition number part (the last 6 digits)
+    const tokenNumber = details.tokenNumber % 1000000 || details.tokenNumber;
+    
+    // This is the line that needs to be properly included in the output
+    let tweetText = `${projectName} #${tokenNumber} by ${details.artistName}\n`;
+    
+    // Add price info
+    tweetText += `sold for ${this.formatPrice(priceEth)} ETH`;
     
     if (usdPrice) {
-      tweetText += ` ($${this.formatPrice(usdPrice)})`;
+      tweetText += ` (${this.formatPrice(usdPrice)})`;
     }
     
+    // Add buyer info and URL
     tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
+    
+    // Debug output to verify the tweet format
+    console.log('\n--- FORMATTED TWEET ---\n');
+    console.log(`${projectName} #${tokenNumber} by ${details.artistName}`);
+    console.log(`sold for ${this.formatPrice(priceEth)} ETH${usdPrice ? ` (${this.formatPrice(usdPrice)})` : ''}`);
+    console.log(`to ${buyerDisplay}`);
+    console.log();
+    console.log(details.artBlocksUrl);
+    console.log('\n---------------------\n');
     
     return tweetText;
   }
