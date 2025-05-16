@@ -1040,195 +1040,197 @@ class TweetManager {
   }
 
   async formatSaleTweet(details, priceEth, usdPrice, buyerDisplay) {
-  // Clean up the project name - remove any "by Artist" suffix if artist name is already provided
-  let projectName = details.projectName.replace(/ #\d+$/, '');
-  
-  // Remove redundant artist mentions in project name
-  if (details.artistName && projectName.toLowerCase().includes(' by ' + details.artistName.toLowerCase())) {
-    projectName = projectName.replace(new RegExp(` by ${details.artistName}`, 'i'), '');
-    console.log(`Removed redundant artist name from project name: ${projectName}`);
-  } else if (details.artistName && projectName.toLowerCase().includes(' by ')) {
-    // Generic "by" handling - might need to clean up
-    projectName = projectName.replace(/ by .+$/i, '');
-    console.log(`Removed generic "by..." from project name: ${projectName}`);
-  }
-  
-  // Make sure we're not using an ETH address as artist name
-  let artistName = details.artistName;
-  if (artistName && artistName.startsWith('0x') && artistName.length === 42) {
-    // This looks like an ETH address, try to get a better artist name
-    if (projectName.toLowerCase().includes(' by ')) {
-      const byMatch = projectName.match(/ by ([^#]+)$/i);
-      if (byMatch && byMatch[1]) {
-        artistName = byMatch[1].trim();
-        console.log(`Extracted better artist name from project name: ${artistName}`);
+    // Clean up the project name - remove any "by Artist" suffix if artist name is already provided
+    let projectName = details.projectName.replace(/ #\d+$/, '');
+    
+    // Remove redundant artist mentions in project name
+    if (details.artistName && projectName.toLowerCase().includes(' by ' + details.artistName.toLowerCase())) {
+      projectName = projectName.replace(new RegExp(` by ${details.artistName}`, 'i'), '');
+      console.log(`Removed redundant artist name from project name: ${projectName}`);
+    } else if (details.artistName && projectName.toLowerCase().includes(' by ')) {
+      // Generic "by" handling - might need to clean up
+      projectName = projectName.replace(/ by .+$/i, '');
+      console.log(`Removed generic "by..." from project name: ${projectName}`);
+    }
+    
+    // Make sure we're not using an ETH address as artist name
+    let artistName = details.artistName;
+    if (artistName && artistName.startsWith('0x') && artistName.length === 42) {
+      // This looks like an ETH address, try to get a better artist name
+      if (projectName.toLowerCase().includes(' by ')) {
+        const byMatch = projectName.match(/ by ([^#]+)$/i);
+        if (byMatch && byMatch[1]) {
+          artistName = byMatch[1].trim();
+          console.log(`Extracted better artist name from project name: ${artistName}`);
+        }
       }
     }
-  }
-  
-  // For Art Blocks tokens, the tokenNumber field might have the full ID
-  // We want just the edition number part (the last 6 digits)
-  const tokenNumber = details.tokenNumber % 1000000 || details.tokenNumber;
-  
-  // This is the line that needs to be properly included in the output
-  let tweetText = `${projectName} #${tokenNumber} by ${artistName}\n`;
-  
-  // Add price info
-  tweetText += `sold for ${this.formatPrice(priceEth)} ETH`;
-  
-  if (usdPrice) {
-    tweetText += ` (${this.formatPrice(usdPrice)})`;
-  }
-  
-  // Add buyer info
-  tweetText += `\nto ${buyerDisplay}`;
-  
-  // Add AI context if available
-  if (details.aiContext) {
-    tweetText += `\n\n🤖 "${details.aiContext}"`;
-  }
-  
-  // Add URL (with an extra line break if we added AI context)
-  tweetText += `\n\n${details.artBlocksUrl}`;
-  
-  // Debug output to verify the tweet format
-  console.log('\n--- FORMATTED TWEET ---\n');
-  console.log(`${projectName} #${tokenNumber} by ${artistName}`);
-  console.log(`sold for ${this.formatPrice(priceEth)} ETH${usdPrice ? ` (${this.formatPrice(usdPrice)})` : ''}`);
-  console.log(`to ${buyerDisplay}`);
-  
-  if (details.aiContext) {
-    console.log(`\n🤖 "${details.aiContext}"`);
-  }
-  
-  console.log();
-  console.log(details.artBlocksUrl);
-  console.log('\n---------------------\n');
-  
-  return tweetText;
-}
-  async generateAIContext(details, projectName, artistName) {
-  try {
-    // Check if OpenAI is configured
-    if (!process.env.OPENAI_API_KEY) {
-      console.log('OpenAI API key not configured, skipping AI context');
-      return null;
+    
+    // For Art Blocks tokens, the tokenNumber field might have the full ID
+    // We want just the edition number part (the last 6 digits)
+    const tokenNumber = details.tokenNumber % 1000000 || details.tokenNumber;
+    
+    // This is the line that needs to be properly included in the output
+    let tweetText = `${projectName} #${tokenNumber} by ${artistName}\n`;
+    
+    // Add price info
+    tweetText += `sold for ${this.formatPrice(priceEth)} ETH`;
+    
+    if (usdPrice) {
+      tweetText += ` (${this.formatPrice(usdPrice)})`;
     }
+    
+    // Add buyer info
+    tweetText += `\nto ${buyerDisplay}`;
+    
+    // Add AI context if available
+    if (details.aiContext) {
+      tweetText += `\n\n🤖 "${details.aiContext}"`;
+    }
+    
+    // Add URL (with an extra line break if we added AI context)
+    tweetText += `\n\n${details.artBlocksUrl}`;
+    
+    // Debug output to verify the tweet format
+    console.log('\n--- FORMATTED TWEET ---\n');
+    console.log(`${projectName} #${tokenNumber} by ${artistName}`);
+    console.log(`sold for ${this.formatPrice(priceEth)} ETH${usdPrice ? ` (${this.formatPrice(usdPrice)})` : ''}`);
+    console.log(`to ${buyerDisplay}`);
+    
+    if (details.aiContext) {
+      console.log(`\n🤖 "${details.aiContext}"`);
+    }
+    
+    console.log();
+    console.log(details.artBlocksUrl);
+    console.log('\n---------------------\n');
+    
+    return tweetText;
+  }
 
-    // Extract description
-    let description = '';
-    
-    // Deep search for description
-    if (details.description) {
-      description = details.description;
-    } else if (details.fullData?.description) {
-      description = details.fullData.description;
-    }
-    
-    // Comprehensive trait extraction - check ALL possible locations
-    let traits = [];
-    let traitMap = {}; // Create a key-value map of traits for easier reference
-    
-    // If we have fullData, search for traits in all possible locations
-    if (details.fullData) {
-      console.log("Searching for traits in fullData...");
+  async generateAIContext(details, projectName, artistName) {
+    try {
+      // Check if OpenAI is configured
+      if (!process.env.OPENAI_API_KEY) {
+        console.log('OpenAI API key not configured, skipping AI context');
+        return null;
+      }
+
+      // Extract description
+      let description = '';
       
-      // Chain of possible locations for traits
-      const possibleTraitLocations = [
-        details.fullData.traits,
-        details.fullData.attributes,
-        details.fullData.features,
-        details.fullData.nft?.traits,
-        details.fullData.metadata?.attributes,
-        details.fullData.rawMetadata?.attributes,
-        details.fullData.project?.traits,
-        details.fullData.project?.features
-      ];
+      // Deep search for description
+      if (details.description) {
+        description = details.description;
+      } else if (details.fullData?.description) {
+        description = details.fullData.description;
+      }
       
-      // Use the first non-empty array of traits we find
-      for (const location of possibleTraitLocations) {
-        if (Array.isArray(location) && location.length > 0) {
-          traits = location;
-          console.log(`Found ${traits.length} traits`);
-          break;
+      // Comprehensive trait extraction - check ALL possible locations
+      let traits = [];
+      let traitMap = {}; // Create a key-value map of traits for easier reference
+      
+      // If we have fullData, search for traits in all possible locations
+      if (details.fullData) {
+        console.log("Searching for traits in fullData...");
+        
+        // Chain of possible locations for traits
+        const possibleTraitLocations = [
+          details.fullData.traits,
+          details.fullData.attributes,
+          details.fullData.features,
+          details.fullData.nft?.traits,
+          details.fullData.metadata?.attributes,
+          details.fullData.rawMetadata?.attributes,
+          details.fullData.project?.traits,
+          details.fullData.project?.features
+        ];
+        
+        // Use the first non-empty array of traits we find
+        for (const location of possibleTraitLocations) {
+          if (Array.isArray(location) && location.length > 0) {
+            traits = location;
+            console.log(`Found ${traits.length} traits`);
+            break;
+          }
+        }
+        
+        // If we still don't have traits, try a deeper recursive search
+        if (traits.length === 0) {
+          console.log("Performing deep search for traits...");
+          traits = this._findTraitsRecursively(details.fullData);
+          console.log(`Deep search found ${traits.length} traits`);
         }
       }
       
-      // If we still don't have traits, try a deeper recursive search
-      if (traits.length === 0) {
-        console.log("Performing deep search for traits...");
-        traits = this._findTraitsRecursively(details.fullData);
-        console.log(`Deep search found ${traits.length} traits`);
+      // Process traits into a formatted text and trait map
+      let traitsText = '';
+      if (Array.isArray(traits) && traits.length > 0) {
+        traitsText = traits.map(trait => {
+          let traitType = trait.trait_type || trait.type || Object.keys(trait)[0];
+          let value = trait.value || trait[traitType];
+          
+          // Skip if this isn't a valid trait
+          if (!traitType || !value) return '';
+          
+          // Normalize trait type to handle case variations
+          const normalizedType = traitType.toLowerCase().trim();
+          traitMap[normalizedType] = value;
+          
+          return `${traitType}: ${value}`;
+        }).filter(Boolean).join(', ');
       }
-    }
-    
-    // Process traits into a formatted text and trait map
-    let traitsText = '';
-    if (Array.isArray(traits) && traits.length > 0) {
-      traitsText = traits.map(trait => {
-        let traitType = trait.trait_type || trait.type || Object.keys(trait)[0];
-        let value = trait.value || trait[traitType];
-        
-        // Skip if this isn't a valid trait
-        if (!traitType || !value) return '';
-        
-        // Normalize trait type to handle case variations
-        const normalizedType = traitType.toLowerCase().trim();
-        traitMap[normalizedType] = value;
-        
-        return `${traitType}: ${value}`;
-      }).filter(Boolean).join(', ');
-    }
-    
-    console.log(`Description length: ${description.length}`);
-    console.log(`Traits found: ${JSON.stringify(traitMap)}`);
+      
+      console.log(`Description length: ${description.length}`);
+      console.log(`Traits found: ${JSON.stringify(traitMap)}`);
 
-    const { OpenAI } = require('openai');
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-    
-    // Create project-specific context
-    let projectContext = '';
-    if (projectName.toLowerCase().includes('squiggle')) {
-      projectContext = "Chromie Squiggles are the iconic Art Blocks genesis project by Snowfro (Erick Calderon).";
+      const { OpenAI } = require('openai');
+      const openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+      });
+      
+      // Create project-specific context
+      let projectContext = '';
+      if (projectName.toLowerCase().includes('squiggle')) {
+        projectContext = "Chromie Squiggles are the iconic Art Blocks genesis project by Snowfro (Erick Calderon).";
+      }
+      
+      // Create a detailed prompt with all available information
+      const prompt = `
+      Project Name: "${projectName}" by artist ${artistName}
+      ${projectContext}
+      ${description ? `Project Description: "${description.substring(0, 500)}"` : ''}
+      ${traitsText ? `Token Traits: ${traitsText}` : ''}
+      
+      Create a specific, compelling fact about this NFT artwork.
+      IMPORTANT: If traits are available, specifically mention the most interesting trait(s) and how they affect the artwork's appearance.
+      For example, if it's a Chromie Squiggle with a "Bold" trait, mention how the bold lines create a distinctive visual impact.
+      Focus on what makes THIS specific token unique. Keep it under 25 words and make it engaging.
+      `;
+      
+      // Call OpenAI API with improved parameters
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o-mini", // Or gpt-3.5-turbo if this isn't available
+        messages: [
+          {role: "system", content: "You are an expert on generative NFT art, especially Art Blocks projects. You provide specific, accurate descriptions that highlight the unique traits and visual characteristics of each token."},
+          {role: "user", content: prompt}
+        ],
+        max_tokens: 60,
+        temperature: 0.7,
+      });
+      
+      // Clean up the response
+      let artContext = response.choices[0].message.content.trim();
+      
+      // Remove quotes if present
+      artContext = artContext.replace(/^["'](.*)["']$/, '$1');
+      
+      console.log(`Generated enhanced art context: ${artContext}`);
+      return artContext;
+    } catch (error) {
+      console.error('OpenAI API error:', error.message);
+      return null;
     }
-    
-    // Create a detailed prompt with all available information
-    const prompt = `
-    Project Name: "${projectName}" by artist ${artistName}
-    ${projectContext}
-    ${description ? `Project Description: "${description.substring(0, 500)}"` : ''}
-    ${traitsText ? `Token Traits: ${traitsText}` : ''}
-    
-    Create a specific, compelling fact about this NFT artwork.
-    IMPORTANT: If traits are available, specifically mention the most interesting trait(s) and how they affect the artwork's appearance.
-    For example, if it's a Chromie Squiggle with a "Bold" trait, mention how the bold lines create a distinctive visual impact.
-    Focus on what makes THIS specific token unique. Keep it under 25 words and make it engaging.
-    `;
-    
-    // Call OpenAI API with improved parameters
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // Or gpt-3.5-turbo if this isn't available
-      messages: [
-        {role: "system", content: "You are an expert on generative NFT art, especially Art Blocks projects. You provide specific, accurate descriptions that highlight the unique traits and visual characteristics of each token."},
-        {role: "user", content: prompt}
-      ],
-      max_tokens: 60,
-      temperature: 0.7,
-    });
-    
-    // Clean up the response
-    let artContext = response.choices[0].message.content.trim();
-    
-    // Remove quotes if present
-    artContext = artContext.replace(/^["'](.*)["']$/, '$1');
-    
-    console.log(`Generated enhanced art context: ${artContext}`);
-    return artContext;
-  } catch (error) {
-    console.error('OpenAI API error:', error.message);
-    return null;
   }
   
   // Helper method to recursively search for traits in complex objects
@@ -1273,7 +1275,6 @@ class TweetManager {
     
     return [];
   }
-}
 }
 
 // =========================================================
