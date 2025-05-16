@@ -10,6 +10,7 @@
 const http = require('http');
 const { TwitterApi } = require('twitter-api-v2');
 const { Alchemy, Network } = require('alchemy-sdk');
+const { ethers } = require('ethers');  // Make sure ethers.js is installed
 const retry = require('async-retry');
 const axios = require('axios');
 require('dotenv').config();
@@ -1458,12 +1459,26 @@ class TransactionProcessor {
     this.metadata = metadataManager;
     this.tweets = tweetManager;
     this.config = config;
+    // Track whether we have active transfer monitoring
+    this.hasDirectEventMonitoring = false;
+    this.hasBackfillMonitoring = false;
+    // Set of processed transaction hashes to avoid duplicates
+    this.processedTransactions = new Set();
   }
 
   async processTransaction(tx, contractAddress) {
     console.log(`Processing transaction for ${contractAddress}: ${tx.hash}`);
     
     try {
+      // Skip if we've already processed this transaction
+      if (this.processedTransactions.has(tx.hash)) {
+        console.log(`Already processed transaction ${tx.hash}, skipping`);
+        return false;
+      }
+      
+      // Mark as processed to avoid duplicates
+      this.processedTransactions.add(tx.hash);
+      
       // Get transaction details
       const transaction = await this.api.alchemy.core.getTransaction(tx.hash);
       if (!transaction || !transaction.to) {
@@ -1554,6 +1569,11 @@ class TransactionProcessor {
       console.log(tweetText);
       console.log('\n---------------------\n');
       
+      // Log a very noticeable message in the console
+      console.log('=========================================');
+      console.log(`💰 SALE DETECTED: ${contractAddress}/${tokenId} for ${priceEth} ETH`);
+      console.log('=========================================');
+      
       // Track this sale event for the debug dashboard
       this.trackSaleEvent(details, priceEth, buyerDisplay, usdPrice, details.artBlocksUrl);
       
@@ -1589,6 +1609,67 @@ class TransactionProcessor {
     }
     
     console.log(`Tracked new sale event: ${details.projectName} #${details.tokenNumber}`);
+  }
+  
+  // ADDED: Process transfer event for direct event monitoring
+  async processTransferEvent(sale) {
+    try {
+      console.log(`Processing transfer sale: ${sale.contractAddress}/${sale.tokenId} for ${sale.priceEth} ETH`);
+      
+      // Skip if below minimum price or zero
+      if (sale.priceEth < this.config.MIN_PRICE_ETH || sale.priceEth === 0) {
+        console.log(`Price ${sale.priceEth} ETH is below minimum threshold or zero, skipping`);
+        return false;
+      }
+      
+      // Get project details
+      const details = await this.metadata.getProjectDetails(sale.tokenId, sale.contractAddress);
+      
+      // Get ETH/USD price
+      const ethPrice = await this.api.getEthPrice();
+      const usdPrice = ethPrice ? (sale.priceEth * ethPrice) : null;
+      
+      // Get buyer info
+      let buyerDisplay = this.tweets.formatAddress(sale.to);
+      
+      // Try to get ENS name
+      const ensName = await this.api.getEnsName(sale.to);
+      if (ensName) {
+        buyerDisplay = ensName;
+      } else {
+        // Try to get OpenSea username
+        const osName = await this.api.getOpenseaUserName(sale.to);
+        if (osName) {
+          buyerDisplay = osName;
+        }
+      }
+      
+      // Generate AI context
+      console.log(`Generating AI context for tweet: ${details.projectName}, Artist: ${details.artistName}`);
+      const aiContext = await this.tweets.generateAIContext(details, details.projectName, details.artistName);
+      console.log(`AI context generated: ${aiContext || 'None'}`);
+      
+      // Add AI context to details object
+      details.aiContext = aiContext;
+      
+      // Format tweet
+      const tweetText = await this.tweets.formatSaleTweet(details, sale.priceEth, usdPrice, buyerDisplay);
+      
+      console.log('\n--- TWEET PREVIEW ---\n');
+      console.log(tweetText);
+      console.log('\n---------------------\n');
+      
+      // Track this sale event for the debug dashboard
+      this.trackSaleEvent(details, sale.priceEth, buyerDisplay, usdPrice, details.artBlocksUrl);
+      
+      // Queue the tweet
+      this.tweets.queueTweet(tweetText);
+      
+      return true;
+    } catch (error) {
+      console.error('Error processing transfer sale:', error);
+      return false;
+    }
   }
 
   async extractSalePrice(transaction, receipt) {
@@ -2674,36 +2755,232 @@ class ArtBlocksSalesBot {
   }
 
   async monitorSales() {
-  console.log('Starting blockchain monitoring of Art Blocks sales as backup...');
-  
-  try {
-    if (this.apiServices.alchemy) {
-      console.log('Setting up Alchemy websocket listener...');
+    console.log('Starting comprehensive blockchain monitoring for Art Blocks sales...');
+    
+    try {
+      if (!this.apiServices.alchemy) {
+        console.error('Alchemy client not initialized, blockchain monitoring disabled');
+        return;
+      }
       
-      this.config.CONTRACT_ADDRESSES.forEach(contractAddress => {
-        console.log(`Setting up listener for contract: ${contractAddress}`);
-        
-        // REMOVE THE fromAddress filter to catch ALL transactions to Art Blocks contracts
-        this.apiServices.alchemy.ws.on(
-          {
-            method: 'alchemy_pendingTransactions',
-            // Remove this line: fromAddress: this.config.OPENSEA_ADDRESS,
-            toAddress: contractAddress,
-          },
-          (tx) => this.txProcessor.processTransaction(tx, contractAddress)
-        );
+      console.log('Setting up robust blockchain monitoring...');
+      
+      // 1. DIRECT TRANSFER EVENT MONITORING - The most reliable approach
+      // This listens for all ERC-721 Transfer events on any Art Blocks contract
+      // It will catch ALL transfers regardless of marketplace
+      const provider = this.apiServices.alchemy.core.provider;
+      
+      // The Transfer event signature
+      const transferEventSignature = "Transfer(address,address,uint256)";
+      const transferTopic = ethers.utils.id(transferEventSignature);
+      
+      // Create log filter for ALL Art Blocks contracts
+      const filter = {
+        topics: [transferTopic],
+        address: this.config.CONTRACT_ADDRESSES
+      };
+      
+      // Log setup details
+      console.log(`Setting up ERC-721 Transfer event filter for ${this.config.CONTRACT_ADDRESSES.length} contracts`);
+      console.log(`Transfer event topic: ${transferTopic}`);
+      
+      // Set up the event listener
+      provider.on(filter, async (log) => {
+        try {
+          // Skip if we've already processed this transaction
+          if (this.txProcessor.processedTransactions.has(log.transactionHash)) {
+            console.log(`Already processed transaction ${log.transactionHash}, skipping`);
+            return;
+          }
+          
+          // Mark as processed to avoid duplicates
+          this.txProcessor.processedTransactions.add(log.transactionHash);
+          
+          console.log(`DETECTED TRANSFER EVENT: ${JSON.stringify(log)}`);
+          
+          // Extract contract address
+          const contractAddress = log.address.toLowerCase();
+          
+          // Extract the token ID (last topic contains the tokenId)
+          const tokenId = parseInt(log.topics[3], 16);
+          
+          // Extract sender and recipient (from topics)
+          const from = '0x' + log.topics[1].substring(26);
+          const to = '0x' + log.topics[2].substring(26);
+          
+          console.log(`Transfer detected: Contract ${contractAddress}, TokenID ${tokenId}, From ${from}, To ${to}`);
+          
+          // Now we need to check if this is a SALE (not just a transfer)
+          // We'll check the transaction for any ETH value or token transfers
+          
+          // Get the full transaction
+          const tx = await provider.getTransaction(log.transactionHash);
+          const receipt = await provider.getTransactionReceipt(log.transactionHash);
+          
+          if (!tx || !receipt) {
+            console.log('Transaction or receipt not found, skipping');
+            return;
+          }
+          
+          // Check for ETH value
+          const priceEth = await this.txProcessor.extractSalePrice(tx, receipt);
+          
+          if (priceEth >= this.config.MIN_PRICE_ETH) {
+            console.log(`CONFIRMED SALE: ${tokenId} for ${priceEth} ETH`);
+            
+            // Process the sale
+            const sale = {
+              hash: log.transactionHash,
+              contractAddress: contractAddress,
+              tokenId: tokenId,
+              priceEth: priceEth,
+              from: from,
+              to: to
+            };
+            
+            // Log a very noticeable message in the console
+            console.log('=========================================');
+            console.log(`💰 SALE DETECTED: ${contractAddress}/${tokenId} for ${priceEth} ETH`);
+            console.log('=========================================');
+            
+            // Process using our existing pipeline
+            await this.txProcessor.processTransferEvent(sale);
+          } else {
+            console.log(`Transfer doesn't appear to be a sale (price: ${priceEth} ETH), skipping`);
+          }
+        } catch (error) {
+          console.error('Error processing transfer event:', error);
+        }
       });
       
-      console.log('Alchemy listeners set up successfully');
-    } else {
-      console.error('Alchemy client not initialized, blockchain monitoring disabled');
+      console.log('Transfer event monitoring set up successfully!');
+      this.txProcessor.hasDirectEventMonitoring = true;
+      
+      // 2. Additionally, continue with OpenSea monitoring as a backup
+      this.openSeaProcessor.startEventPolling();
+      
+      // 3. Add periodic backfill monitoring to catch any missed sales
+      const backfillIntervalId = setInterval(async () => {
+        if (VERBOSE_LOGGING) {
+          console.log('Running periodic backfill check for recent sales...');
+        }
+        
+        try {
+          // Scan the last 1000 blocks for Transfer events we might have missed
+          const latestBlock = await provider.getBlockNumber();
+          const fromBlock = latestBlock - 1000; // ~4 hours of history
+          
+          console.log(`Scanning blocks ${fromBlock} to ${latestBlock} for missed transfers...`);
+          
+          // Same filter as above but with block range
+          const pastFilter = {
+            topics: [transferTopic],
+            address: this.config.CONTRACT_ADDRESSES,
+            fromBlock: fromBlock,
+            toBlock: latestBlock
+          };
+          
+          const events = await provider.getLogs(pastFilter);
+          console.log(`Found ${events.length} past transfer events to check`);
+          
+          // Process each event (we can deduplicate based on transaction hash)
+          for (const event of events) {
+            const txHash = event.transactionHash;
+            
+            // Skip if we've already processed this transaction
+            if (this.txProcessor.processedTransactions.has(txHash)) {
+              continue;
+            }
+            
+            this.txProcessor.processedTransactions.add(txHash);
+            
+            // Create a minimal tx object with the hash
+            const tx = { hash: txHash };
+            const contractAddress = event.address.toLowerCase();
+            
+            // Process using our standard pipeline
+            await this.txProcessor.processTransaction(tx, contractAddress);
+          }
+        } catch (error) {
+          console.error('Error in backfill monitoring:', error);
+        }
+      }, 15 * 60 * 1000); // Run every 15 minutes
+      
+      this.txProcessor.hasBackfillMonitoring = true;
+      this.backfillIntervalId = backfillIntervalId;
+      
+      // 4. Run an immediate backfill for recent history (last 6 hours)
+      console.log('Running immediate backfill for recent history...');
+      try {
+        const latestBlock = await provider.getBlockNumber();
+        const fromBlock = latestBlock - 2000; // ~8 hours of history
+        
+        console.log(`Initial scan of blocks ${fromBlock} to ${latestBlock} for recent transfers...`);
+        
+        const pastFilter = {
+          topics: [transferTopic],
+          address: this.config.CONTRACT_ADDRESSES,
+          fromBlock: fromBlock,
+          toBlock: latestBlock
+        };
+        
+        const events = await provider.getLogs(pastFilter);
+        console.log(`Found ${events.length} recent transfer events to check`);
+        
+        // Create a queue of events to process
+        const eventQueue = [...events];
+        
+        // Process events in batches to avoid overloading
+        const processNextBatch = async () => {
+          const batch = eventQueue.splice(0, 5); // Process 5 at a time
+          
+          if (batch.length === 0) {
+            console.log('Finished processing all recent transfer events');
+            return;
+          }
+          
+          for (const event of batch) {
+            const txHash = event.transactionHash;
+            
+            // Skip if we've already processed this transaction
+            if (this.txProcessor.processedTransactions.has(txHash)) {
+              continue;
+            }
+            
+            this.txProcessor.processedTransactions.add(txHash);
+            
+            // Create a minimal tx object with the hash
+            const tx = { hash: txHash };
+            const contractAddress = event.address.toLowerCase();
+            
+            // Process using our standard pipeline
+            await this.txProcessor.processTransaction(tx, contractAddress);
+          }
+          
+          // Process next batch after a short delay
+          setTimeout(processNextBatch, 1000);
+        };
+        
+        // Start processing the first batch
+        processNextBatch();
+      } catch (error) {
+        console.error('Error in initial backfill:', error);
+      }
+      
+      // 5. Send initial test tweet after a delay
+      if (!this.config.DISABLE_TWEETS) {
+        console.log(`Waiting ${this.config.INITIAL_STARTUP_DELAY/60000} minutes before sending first tweet...`);
+        setTimeout(async () => {
+          await this.tweets.sendTestTweet();
+        }, this.config.INITIAL_STARTUP_DELAY);
+      } else {
+        console.log('Tweets are disabled. The bot will only preview tweets in the console.');
+        console.log('To enable tweets, use the /enable-tweets endpoint.');
+      }
+    } catch (error) {
+      console.error('Error in monitorSales function:', error);
     }
-    
-    // Rest of your function...
-  } catch (error) {
-    console.error('Error in monitorSales function:', error);
   }
-}
 
   setupHealthChecks() {
     // Send a health check tweet once a day to verify the bot is still running
