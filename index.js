@@ -1,4 +1,163 @@
-const http = require('http');
+  } else if (req.url.startsWith('/test-metadata')) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tokenId = url.searchParams.get('tokenId');
+    const contractAddress = url.searchParams.get('contract') || CONFIG.CONTRACT_ADDRESSES[0];
+    
+    if (!tokenId) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing tokenId. Use ?tokenId=1506 in the URL');
+      return;
+    }
+    
+    console.log(`Testing metadata retrieval for token: ${tokenId} on contract: ${contractAddress}`);
+    
+    getProjectDetails(tokenId, contractAddress)
+      .then(details => {
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify(details, null, 2));
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });// Function to extract artist from Alchemy metadata
+function extractArtistFromAlchemy(nftMetadata) {
+  if (!nftMetadata) return null;
+  
+  // Log all attributes for debugging
+  if (nftMetadata.rawMetadata?.attributes) {
+    console.log('All attributes:', JSON.stringify(nftMetadata.rawMetadata.attributes, null, 2));
+  }
+  
+  // Try different approaches to find the artist
+  
+  // Method 1: Check for an attribute with trait_type "artist"
+  const artistAttribute = nftMetadata.rawMetadata?.attributes?.find(
+    attr => attr.trait_type?.toLowerCase() === 'artist'
+  );
+  
+  if (artistAttribute?.value) {
+    console.log(`Found artist in 'artist' trait: ${artistAttribute.value}`);
+    return artistAttribute.value;
+  }
+  
+  // Method 2: Look for any attribute containing the word "artist"
+  const artistLikeAttribute = nftMetadata.rawMetadata?.attributes?.find(
+    attr => 
+      (attr.trait_type && attr.trait_type.toLowerCase().includes('artist')) ||
+      (attr.key && attr.key.toLowerCase().includes('artist'))
+  );
+  
+  if (artistLikeAttribute?.value) {
+    console.log(`Found artist in artist-like trait: ${artistLikeAttribute.value}`);
+    return artistLikeAttribute.value;
+  }
+  
+  // Method 3: Check for attributes specific to Art Blocks format
+  // Art Blocks often stores artist information in the first attribute with a project name
+  const projectAttribute = nftMetadata.rawMetadata?.attributes?.find(
+    attr => attr.trait_type?.includes('Squiggle') || 
+           attr.trait_type?.includes('Fidenza') ||
+           attr.trait_type?.includes('Ringers')
+  );
+  
+  if (projectAttribute) {
+    console.log(`Found potential project-specific attribute: ${JSON.stringify(projectAttribute)}`);
+    // The associated value might contain artist info
+  }
+  
+  // Method 4: Check for creator field in raw metadata
+  if (nftMetadata.rawMetadata?.creator) {
+    console.log(`Found creator field: ${nftMetadata.rawMetadata.creator}`);
+    return nftMetadata.rawMetadata.creator;
+  }
+  
+  // Method 5: Check description for artist information
+  if (nftMetadata.description) {
+    const desc = nftMetadata.description.toLowerCase();
+    if (desc.includes('by snowfro')) return 'Snowfro';
+    if (desc.includes('by tyler hobbs')) return 'Tyler Hobbs';
+    // Add more patterns as needed
+  }
+  
+  // Method 6: Look for contract-level metadata
+  if (nftMetadata.contract?.openSea?.collectionName) {
+    const collectionName = nftMetadata.contract.openSea.collectionName;
+    console.log(`Collection name from contract data: ${collectionName}`);
+    // We could do further processing here if needed
+  }
+  
+  console.log('Could not find artist information in Alchemy metadata');
+  return null;
+}
+
+// Function to get metadata from Alchemy NFT API
+async function getAlchemyMetadata(contractAddress, tokenId) {
+  try {
+    console.log(`Fetching NFT metadata from Alchemy for token ${tokenId}`);
+    const nftMetadata = await alchemy.nft.getNftMetadata(
+      contractAddress,
+      tokenId
+    );
+    
+    console.log('Alchemy NFT metadata:', JSON.stringify(nftMetadata, null, 2));
+    
+    if (!nftMetadata) {
+      return { success: false };
+    }
+    
+    // Extract the project name (removing any token number suffix)
+    let projectName = nftMetadata.title || nftMetadata.contract?.name || '';
+    projectName = projectName.replace(/ #\d+$/, '');
+    
+    // Extract artist name using our helper function
+    const artistName = extractArtistFromAlchemy(nftMetadata);
+    
+    // Get the token number
+    const tokenNumber = nftMetadata.tokenId || tokenId;
+    
+    return {
+      success: true,
+      projectName,
+      artistName,
+      tokenNumber,
+      description: nftMetadata.description,
+      imageUrl: nftMetadata.media?.[0]?.gateway || null,
+      fullData: nftMetadata
+    };
+  } catch (error) {
+    console.error('Error fetching from Alchemy:', error.message);
+    return { success: false };
+  }
+}
+
+// Function to get OpenSea collection info (as backup)
+async function getOpenSeaCollectionInfo(contractAddress) {
+  try {
+    console.log(`Looking up collection info for contract: ${contractAddress}`);
+    
+    const response = await axios.get(
+      `https://api.opensea.io/api/v2/chain/ethereum/contract/${contractAddress}`,
+      { headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY } }
+    );
+    
+    console.log('OpenSea collection info:', JSON.stringify(response.data, null, 2));
+    
+    if (response.data) {
+      return {
+        success: true,
+        name: response.data.name,
+        description: response.data.description,
+        // Extract other useful fields
+        fullData: response.data
+      };
+    }
+    
+    return { success: false };
+  } catch (error) {
+    console.error('Error getting OpenSea collection info:', error.message);
+    return { success: false };
+  }
+}const http = require('http');
 const { TwitterApi } = require('twitter-api-v2');
 const { Alchemy, Network } = require('alchemy-sdk');
 const retry = require('async-retry');
@@ -248,7 +407,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(500, {'Content-Type': 'text/plain'});
         res.end('Error: ' + err.message);
       });
-  } else if (req.url.startsWith('/test-metadata')) {
+  } else if (req.url.startsWith('/debug-metadata')) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const tokenId = url.searchParams.get('tokenId');
     const contractAddress = url.searchParams.get('contract') || CONFIG.CONTRACT_ADDRESSES[0];
@@ -259,12 +418,36 @@ const server = http.createServer((req, res) => {
       return;
     }
     
-    console.log(`Testing metadata retrieval for token: ${tokenId} on contract: ${contractAddress}`);
+    console.log(`Debugging metadata for token: ${tokenId} on contract: ${contractAddress}`);
     
-    getProjectDetails(tokenId, contractAddress)
-      .then(details => {
-        res.writeHead(200, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify(details, null, 2));
+    // Get Art Blocks API data
+    getArtBlocksTokenInfo(tokenId, contractAddress)
+      .then(artBlocksData => {
+        // Get Alchemy metadata
+        return getAlchemyMetadata(contractAddress, tokenId)
+          .then(alchemyData => {
+            // Get OpenSea collection info
+            return getOpenSeaCollectionInfo(contractAddress)
+              .then(osCollectionData => {
+                // Compile all results
+                const result = {
+                  artBlocksApi: artBlocksData,
+                  alchemyApi: alchemyData,
+                  openSeaCollection: osCollectionData,
+                  // Get the final combined metadata
+                  finalMetadata: null
+                };
+                
+                // Now get the final combined metadata
+                return getProjectDetails(tokenId, contractAddress)
+                  .then(finalData => {
+                    result.finalMetadata = finalData;
+                    
+                    res.writeHead(200, {'Content-Type': 'application/json'});
+                    res.end(JSON.stringify(result, null, 2));
+                  });
+              });
+          });
       })
       .catch(err => {
         res.writeHead(500, {'Content-Type': 'text/plain'});
@@ -294,6 +477,7 @@ Art Blocks Sales Bot - Available Endpoints:
 /test-transaction?hash=0x... - Test transaction processing (auto-detects contract)
 /test-output?hash=0x...      - Preview tweet for a transaction (auto-detects contract)
 /test-metadata?tokenId=1506  - Test metadata retrieval for a specific token
+/debug-metadata?tokenId=1506 - Debug all API responses for a specific token
 /clear-cache        - Clear metadata and price caches
 /reset-rate-limit   - Reset rate limit tracking
 /help               - Show this help page
@@ -466,10 +650,30 @@ async function getArtBlocksTokenInfo(tokenId, contractAddress) {
     
     console.log('Art Blocks API response:', JSON.stringify(response.data, null, 2));
     
-    return response.data;
+    // Determine if this response has the data we need
+    if (response.data && typeof response.data === 'object') {
+      // Look for the artist information in various possible locations
+      // Different versions of the API might structure data differently
+      const data = response.data;
+      
+      // Return a structured object with the fields we need
+      return {
+        success: true,
+        projectName: data.project?.name || data.title || null,
+        artistName: data.project?.artist_name || data.project?.artist || data.artist || null,
+        description: data.description || null,
+        projectId: data.project?.projectId || null,
+        tokenId: data.tokenId || tokenId,
+        imageUrl: data.image || data.imageUrl || data.media?.image || null,
+        // Include the full data for additional parsing if needed
+        fullData: data
+      };
+    }
+    
+    return { success: false };
   } catch (error) {
     console.error('Error fetching from Art Blocks API:', error.message);
-    return null;
+    return { success: false };
   }
 }
 
@@ -513,7 +717,11 @@ async function getProjectDetails(tokenId, contractAddress) {
       
       if (nftMetadata) {
         // Extract information from Alchemy response
+        // Don't include the number in the project name since we'll add it in the tweet format
         projectName = nftMetadata.title || nftMetadata.contract.name || `Art Blocks #${projectId}`;
+        
+        // Remove token number from the project name if it's there
+        projectName = projectName.replace(/ #\d+$/, '');
         
         // Extract artist from metadata attributes
         const artistAttribute = nftMetadata.rawMetadata?.attributes?.find(
@@ -521,6 +729,22 @@ async function getProjectDetails(tokenId, contractAddress) {
         );
         
         artistName = artistAttribute?.value || 'Unknown Artist';
+        
+        // Specific handling for known collections
+        // Check if the collection name matches any known collections
+        if (normalizedAddress === '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a' && projectId === 0) {
+          // Chromie Squiggle is always by Snowfro
+          artistName = 'Snowfro';
+        } else {
+          // Try to match against known collections
+          const lowercaseProjectName = projectName.toLowerCase();
+          for (const [collectionKey, artistValue] of Object.entries(knownCollections)) {
+            if (lowercaseProjectName.includes(collectionKey)) {
+              artistName = artistValue;
+              break;
+            }
+          }
+        }
       } else {
         throw new Error('No metadata returned from Alchemy');
       }
@@ -957,14 +1181,21 @@ async function processTransaction(tx, contractAddress) {
     }
     
     // Format tweet
-    let tweetText = `${details.projectName} #${details.tokenNumber} by ${details.artistName}`;
+    // Make sure the project name doesn't already contain the token number
+    const projectName = details.projectName.replace(/ #\d+$/, '');
+    
+    let tweetText = `${projectName} #${details.tokenNumber} by ${details.artistName}`;
     tweetText += `\nsold for ${formatPrice(priceEth)} ETH`;
     
     if (usdPrice) {
-      tweetText += ` ($${formatPrice(usdPrice)})`;
+      tweetText += ` (${formatPrice(usdPrice)})`;
     }
     
     tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
+    
+    console.log('\n--- TWEET PREVIEW ---\n');
+    console.log(tweetText);
+    console.log('\n---------------------\n');
     
     console.log('Final tweet text:', tweetText);
     
@@ -1163,7 +1394,7 @@ async function testTransactionOutput(txHash, contractAddress) {
     tweetText += `\nsold for ${formatPrice(priceEth)} ETH`;
     
     if (usdPrice) {
-      tweetText += ` ($${formatPrice(usdPrice)})`;
+      tweetText += ` (${formatPrice(usdPrice)})`;
     }
     
     tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
