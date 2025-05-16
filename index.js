@@ -1,163 +1,4 @@
-  } else if (req.url.startsWith('/test-metadata')) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const tokenId = url.searchParams.get('tokenId');
-    const contractAddress = url.searchParams.get('contract') || CONFIG.CONTRACT_ADDRESSES[0];
-    
-    if (!tokenId) {
-      res.writeHead(400, {'Content-Type': 'text/plain'});
-      res.end('Error: Missing tokenId. Use ?tokenId=1506 in the URL');
-      return;
-    }
-    
-    console.log(`Testing metadata retrieval for token: ${tokenId} on contract: ${contractAddress}`);
-    
-    getProjectDetails(tokenId, contractAddress)
-      .then(details => {
-        res.writeHead(200, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify(details, null, 2));
-      })
-      .catch(err => {
-        res.writeHead(500, {'Content-Type': 'text/plain'});
-        res.end('Error: ' + err.message);
-      });// Function to extract artist from Alchemy metadata
-function extractArtistFromAlchemy(nftMetadata) {
-  if (!nftMetadata) return null;
-  
-  // Log all attributes for debugging
-  if (nftMetadata.rawMetadata?.attributes) {
-    console.log('All attributes:', JSON.stringify(nftMetadata.rawMetadata.attributes, null, 2));
-  }
-  
-  // Try different approaches to find the artist
-  
-  // Method 1: Check for an attribute with trait_type "artist"
-  const artistAttribute = nftMetadata.rawMetadata?.attributes?.find(
-    attr => attr.trait_type?.toLowerCase() === 'artist'
-  );
-  
-  if (artistAttribute?.value) {
-    console.log(`Found artist in 'artist' trait: ${artistAttribute.value}`);
-    return artistAttribute.value;
-  }
-  
-  // Method 2: Look for any attribute containing the word "artist"
-  const artistLikeAttribute = nftMetadata.rawMetadata?.attributes?.find(
-    attr => 
-      (attr.trait_type && attr.trait_type.toLowerCase().includes('artist')) ||
-      (attr.key && attr.key.toLowerCase().includes('artist'))
-  );
-  
-  if (artistLikeAttribute?.value) {
-    console.log(`Found artist in artist-like trait: ${artistLikeAttribute.value}`);
-    return artistLikeAttribute.value;
-  }
-  
-  // Method 3: Check for attributes specific to Art Blocks format
-  // Art Blocks often stores artist information in the first attribute with a project name
-  const projectAttribute = nftMetadata.rawMetadata?.attributes?.find(
-    attr => attr.trait_type?.includes('Squiggle') || 
-           attr.trait_type?.includes('Fidenza') ||
-           attr.trait_type?.includes('Ringers')
-  );
-  
-  if (projectAttribute) {
-    console.log(`Found potential project-specific attribute: ${JSON.stringify(projectAttribute)}`);
-    // The associated value might contain artist info
-  }
-  
-  // Method 4: Check for creator field in raw metadata
-  if (nftMetadata.rawMetadata?.creator) {
-    console.log(`Found creator field: ${nftMetadata.rawMetadata.creator}`);
-    return nftMetadata.rawMetadata.creator;
-  }
-  
-  // Method 5: Check description for artist information
-  if (nftMetadata.description) {
-    const desc = nftMetadata.description.toLowerCase();
-    if (desc.includes('by snowfro')) return 'Snowfro';
-    if (desc.includes('by tyler hobbs')) return 'Tyler Hobbs';
-    // Add more patterns as needed
-  }
-  
-  // Method 6: Look for contract-level metadata
-  if (nftMetadata.contract?.openSea?.collectionName) {
-    const collectionName = nftMetadata.contract.openSea.collectionName;
-    console.log(`Collection name from contract data: ${collectionName}`);
-    // We could do further processing here if needed
-  }
-  
-  console.log('Could not find artist information in Alchemy metadata');
-  return null;
-}
-
-// Function to get metadata from Alchemy NFT API
-async function getAlchemyMetadata(contractAddress, tokenId) {
-  try {
-    console.log(`Fetching NFT metadata from Alchemy for token ${tokenId}`);
-    const nftMetadata = await alchemy.nft.getNftMetadata(
-      contractAddress,
-      tokenId
-    );
-    
-    console.log('Alchemy NFT metadata:', JSON.stringify(nftMetadata, null, 2));
-    
-    if (!nftMetadata) {
-      return { success: false };
-    }
-    
-    // Extract the project name (removing any token number suffix)
-    let projectName = nftMetadata.title || nftMetadata.contract?.name || '';
-    projectName = projectName.replace(/ #\d+$/, '');
-    
-    // Extract artist name using our helper function
-    const artistName = extractArtistFromAlchemy(nftMetadata);
-    
-    // Get the token number
-    const tokenNumber = nftMetadata.tokenId || tokenId;
-    
-    return {
-      success: true,
-      projectName,
-      artistName,
-      tokenNumber,
-      description: nftMetadata.description,
-      imageUrl: nftMetadata.media?.[0]?.gateway || null,
-      fullData: nftMetadata
-    };
-  } catch (error) {
-    console.error('Error fetching from Alchemy:', error.message);
-    return { success: false };
-  }
-}
-
-// Function to get OpenSea collection info (as backup)
-async function getOpenSeaCollectionInfo(contractAddress) {
-  try {
-    console.log(`Looking up collection info for contract: ${contractAddress}`);
-    
-    const response = await axios.get(
-      `https://api.opensea.io/api/v2/chain/ethereum/contract/${contractAddress}`,
-      { headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY } }
-    );
-    
-    console.log('OpenSea collection info:', JSON.stringify(response.data, null, 2));
-    
-    if (response.data) {
-      return {
-        success: true,
-        name: response.data.name,
-        description: response.data.description,
-        // Extract other useful fields
-        fullData: response.data
-      };
-    }
-    
-    return { success: false };
-  } catch (error) {
-    console.error('Error getting OpenSea collection info:', error.message);
-    return { success: false };
-  }
-}const http = require('http');
+const http = require('http');
 const { TwitterApi } = require('twitter-api-v2');
 const { Alchemy, Network } = require('alchemy-sdk');
 const retry = require('async-retry');
@@ -230,28 +71,22 @@ const contractNames = {
   '0xea698596b6009a622c3ed00dd5a8b5d1cae4fc36': 'Art Blocks Collaborations',
 };
 
-// Fallback project info (use only when API calls fail)
-const projectInfo = {
-  // Flagship V1 (main contract)
-  '0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270': {
-    0: { name: 'Chromie Squiggle', artist: 'Snowfro' },
-    3: { name: 'Fidenza', artist: 'Tyler Hobbs' },
-    4: { name: 'Ringers', artist: 'Dmitri Cherniak' },
-    5: { name: 'Archetype', artist: 'Kjetil Golid' },
-    23: { name: 'Gazers', artist: 'Matt Kane' },
-    24: { name: 'Genesis', artist: 'DCA' },
-    94: { name: 'Elevated Deconstructions', artist: 'Emon Hassan' },
-    237: { name: 'Subscapes', artist: 'Matt DesLauriers' },
-  },
-  // Flagship V0
-  '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a': {
-    0: { name: 'Chromie Squiggle', artist: 'Snowfro' },
-  },
-  // Curated V3.2
-  '0xab0000000000aa06f89b268d604a9c1c41524ac6': {
-    0: { name: 'Moments of Computation', artist: 'William Mapan' },
-    1: { name: 'Sudfeh', artist: 'Monica Rizzolli' },
-  },
+// Fallback project info (only use when all APIs fail)
+const projectInfo = {};
+
+// Known collections for artist mapping
+const knownCollections = {
+  'chromie squiggle': 'Snowfro',
+  'fidenza': 'Tyler Hobbs',
+  'ringers': 'Dmitri Cherniak',
+  'archetype': 'Kjetil Golid',
+  'gazers': 'Matt Kane',
+  'genesis': 'DCA',
+  'elevated deconstructions': 'Emon Hassan',
+  'subscapes': 'Matt DesLauriers',
+  'meridian': 'Matt DesLauriers',
+  'sudfeh': 'Monica Rizzolli',
+  'moments of computation': 'William Mapan',
 };
 
 // Initialize HTTP server for health checks and manual triggers
@@ -407,6 +242,28 @@ const server = http.createServer((req, res) => {
         res.writeHead(500, {'Content-Type': 'text/plain'});
         res.end('Error: ' + err.message);
       });
+  } else if (req.url.startsWith('/test-metadata')) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tokenId = url.searchParams.get('tokenId');
+    const contractAddress = url.searchParams.get('contract') || CONFIG.CONTRACT_ADDRESSES[0];
+    
+    if (!tokenId) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing tokenId. Use ?tokenId=1506 in the URL');
+      return;
+    }
+    
+    console.log(`Testing metadata retrieval for token: ${tokenId} on contract: ${contractAddress}`);
+    
+    getProjectDetails(tokenId, contractAddress)
+      .then(details => {
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify(details, null, 2));
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
   } else if (req.url.startsWith('/debug-metadata')) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const tokenId = url.searchParams.get('tokenId');
@@ -489,6 +346,9 @@ Example usage:
     
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end(helpText);
+  } else {
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Art Blocks Sales Bot is running. Visit /help for available endpoints.');
   }
 });
 
@@ -677,6 +537,170 @@ async function getArtBlocksTokenInfo(tokenId, contractAddress) {
   }
 }
 
+// Function to extract artist from Alchemy metadata with improved logic
+function extractArtistFromAlchemy(nftMetadata) {
+  if (!nftMetadata) return null;
+  
+  // Log all attributes for debugging
+  if (nftMetadata.rawMetadata?.attributes) {
+    console.log('All attributes:', JSON.stringify(nftMetadata.rawMetadata.attributes, null, 2));
+  }
+  
+  // Try different approaches to find the artist
+  
+  // Method 1: Check for an attribute with trait_type "artist"
+  const artistAttribute = nftMetadata.rawMetadata?.attributes?.find(
+    attr => attr.trait_type?.toLowerCase() === 'artist' || 
+           attr.trait_type?.toLowerCase() === 'created by'
+  );
+  
+  if (artistAttribute?.value) {
+    console.log(`Found artist in 'artist' trait: ${artistAttribute.value}`);
+    return artistAttribute.value;
+  }
+  
+  // Method 2: Look for any attribute containing the word "artist" or "creator"
+  const artistLikeAttribute = nftMetadata.rawMetadata?.attributes?.find(
+    attr => 
+      (attr.trait_type && (
+        attr.trait_type.toLowerCase().includes('artist') || 
+        attr.trait_type.toLowerCase().includes('creator') ||
+        attr.trait_type.toLowerCase().includes('author')
+      )) ||
+      (attr.key && (
+        attr.key.toLowerCase().includes('artist') ||
+        attr.key.toLowerCase().includes('creator') ||
+        attr.key.toLowerCase().includes('author')
+      ))
+  );
+  
+  if (artistLikeAttribute?.value) {
+    console.log(`Found artist in artist-like trait: ${artistLikeAttribute.value}`);
+    return artistLikeAttribute.value;
+  }
+  
+  // Method 3: Check for 'creator' field in the rawMetadata
+  if (nftMetadata.rawMetadata?.creator) {
+    console.log(`Found creator field: ${nftMetadata.rawMetadata.creator}`);
+    return nftMetadata.rawMetadata.creator;
+  }
+  
+  // Method 4: Check for contract-level metadata about the creator
+  if (nftMetadata.contract?.openSea?.collectionName) {
+    // This is a bit of a stretch, but sometimes collection name includes creator
+    const collectionName = nftMetadata.contract.openSea.collectionName;
+    console.log(`Collection name from contract data: ${collectionName}`);
+    
+    if (nftMetadata.contract.openSea.safelistRequestStatus === 'verified') {
+      // If this is a verified collection, the description might contain artist info
+      console.log('Collection is verified, checking description');
+      if (nftMetadata.contract.openSea?.description) {
+        const desc = nftMetadata.contract.openSea.description.toLowerCase();
+        // Look for "by [name]" pattern in description
+        const byMatch = desc.match(/by\s+([a-z0-9\s]+)/i);
+        if (byMatch && byMatch[1]) {
+          console.log(`Found potential artist in description: ${byMatch[1]}`);
+          return byMatch[1].trim();
+        }
+      }
+    }
+  }
+  
+  // Method 5: Check if the title contains "by [name]" pattern
+  if (nftMetadata.title) {
+    const titleMatch = nftMetadata.title.match(/by\s+([a-z0-9\s]+)/i);
+    if (titleMatch && titleMatch[1]) {
+      console.log(`Found potential artist in title: ${titleMatch[1]}`);
+      return titleMatch[1].trim();
+    }
+  }
+  
+  // Method 6: Check for specific Art Blocks format in attributes
+  // Art Blocks often has specific naming patterns in attributes
+  const projectAttribute = nftMetadata.rawMetadata?.attributes?.find(
+    attr => attr.trait_type?.includes('Squiggle') || 
+           attr.trait_type?.includes('Fidenza') ||
+           attr.trait_type?.includes('Ringers')
+  );
+  
+  if (projectAttribute) {
+    console.log(`Found potential project-specific attribute: ${JSON.stringify(projectAttribute)}`);
+    // Since we're not using hardcoded mapping anymore, we can't directly map from this
+  }
+  
+  console.log('Could not find artist information in Alchemy metadata');
+  return null;
+}
+
+// Function to get metadata from Alchemy NFT API
+async function getAlchemyMetadata(contractAddress, tokenId) {
+  try {
+    console.log(`Fetching NFT metadata from Alchemy for token ${tokenId}`);
+    const nftMetadata = await alchemy.nft.getNftMetadata(
+      contractAddress,
+      tokenId
+    );
+    
+    console.log('Alchemy NFT metadata:', JSON.stringify(nftMetadata, null, 2));
+    
+    if (!nftMetadata) {
+      return { success: false };
+    }
+    
+    // Extract the project name (removing any token number suffix)
+    let projectName = nftMetadata.title || nftMetadata.contract?.name || '';
+    projectName = projectName.replace(/ #\d+$/, '');
+    
+    // Extract artist name using our helper function
+    const artistName = extractArtistFromAlchemy(nftMetadata);
+    
+    // Get the token number
+    const tokenNumber = nftMetadata.tokenId || tokenId;
+    
+    return {
+      success: true,
+      projectName,
+      artistName,
+      tokenNumber,
+      description: nftMetadata.description,
+      imageUrl: nftMetadata.media?.[0]?.gateway || null,
+      fullData: nftMetadata
+    };
+  } catch (error) {
+    console.error('Error fetching from Alchemy:', error.message);
+    return { success: false };
+  }
+}
+
+// Function to get OpenSea collection info (as backup)
+async function getOpenSeaCollectionInfo(contractAddress) {
+  try {
+    console.log(`Looking up collection info for contract: ${contractAddress}`);
+    
+    const response = await axios.get(
+      `https://api.opensea.io/api/v2/chain/ethereum/contract/${contractAddress}`,
+      { headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY } }
+    );
+    
+    console.log('OpenSea collection info:', JSON.stringify(response.data, null, 2));
+    
+    if (response.data) {
+      return {
+        success: true,
+        name: response.data.name,
+        description: response.data.description,
+        // Extract other useful fields
+        fullData: response.data
+      };
+    }
+    
+    return { success: false };
+  } catch (error) {
+    console.error('Error getting OpenSea collection info:', error.message);
+    return { success: false };
+  }
+}
+
 // Enhanced getProjectDetails function with dynamic API fetching
 async function getProjectDetails(tokenId, contractAddress) {
   const normalizedAddress = contractAddress.toLowerCase();
@@ -694,108 +718,165 @@ async function getProjectDetails(tokenId, contractAddress) {
   const projectId = Math.floor(tokenId / 1000000);
   const tokenNumber = tokenId % 1000000;
   
-  let projectName, artistName;
+  let projectName = '';
+  let artistName = '';
+  let description = '';
   
-  // Try Art Blocks API first (most authoritative source)
+  // 1. Try Art Blocks API first (most authoritative source)
   const artBlocksData = await getArtBlocksTokenInfo(tokenId, normalizedAddress);
   
-  if (artBlocksData && artBlocksData.project) {
+  if (artBlocksData && artBlocksData.success) {
     console.log('Successfully fetched data from Art Blocks API');
     
-    projectName = artBlocksData.project.name || `Art Blocks #${projectId}`;
-    artistName = artBlocksData.project.artist_name || artBlocksData.project.artist || 'Unknown Artist';
-  } else {
-    // Try Alchemy NFT API
+    projectName = artBlocksData.projectName || '';
+    artistName = artBlocksData.artistName || '';
+    description = artBlocksData.description || '';
+    
+    console.log(`Art Blocks API returned - Project: ${projectName}, Artist: ${artistName}`);
+  } 
+  
+  // 2. If Art Blocks API didn't provide complete info, try Alchemy
+  if (!projectName || !artistName) {
+    const alchemyData = await getAlchemyMetadata(normalizedAddress, tokenId);
+    
+    if (alchemyData && alchemyData.success) {
+      console.log('Successfully fetched data from Alchemy API');
+      
+      // Only use Alchemy data if the Art Blocks API didn't provide it
+      if (!projectName) projectName = alchemyData.projectName || '';
+      if (!artistName) artistName = alchemyData.artistName || '';
+      if (!description) description = alchemyData.description || '';
+      
+      console.log(`Alchemy API returned - Project: ${projectName}, Artist: ${artistName}`);
+    }
+  }
+  
+  // 3. If we still don't have complete info, try OpenSea token information
+  if (!projectName || !artistName) {
     try {
-      console.log(`Fetching NFT metadata from Alchemy for token ${tokenId}`);
-      const nftMetadata = await alchemy.nft.getNftMetadata(
-        normalizedAddress,
-        tokenId
+      // Try to get token data from OpenSea
+      console.log(`Trying OpenSea API for token ${tokenId}`);
+      const osTokenResponse = await axios.get(
+        `https://api.opensea.io/api/v2/chain/ethereum/contract/${normalizedAddress}/nfts/${tokenId}`,
+        { headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY } }
       );
       
-      console.log('Alchemy NFT metadata:', JSON.stringify(nftMetadata, null, 2));
+      console.log('OpenSea token API response:', JSON.stringify(osTokenResponse.data, null, 2));
       
-      if (nftMetadata) {
-        // Extract information from Alchemy response
-        // Don't include the number in the project name since we'll add it in the tweet format
-        projectName = nftMetadata.title || nftMetadata.contract.name || `Art Blocks #${projectId}`;
+      if (osTokenResponse.data) {
+        const osData = osTokenResponse.data;
         
-        // Remove token number from the project name if it's there
-        projectName = projectName.replace(/ #\d+$/, '');
+        // Only use OpenSea data if we don't already have it
+        if (!projectName) {
+          projectName = osData.name || osData.collection?.name || '';
+          // Remove token number if present
+          projectName = projectName.replace(/ #\d+$/, '');
+        }
         
-        // Extract artist from metadata attributes
-        const artistAttribute = nftMetadata.rawMetadata?.attributes?.find(
-          attr => attr.trait_type?.toLowerCase() === 'artist'
-        );
-        
-        artistName = artistAttribute?.value || 'Unknown Artist';
-        
-        // Specific handling for known collections
-        // Check if the collection name matches any known collections
-        if (normalizedAddress === '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a' && projectId === 0) {
-          // Chromie Squiggle is always by Snowfro
-          artistName = 'Snowfro';
-        } else {
-          // Try to match against known collections
-          const lowercaseProjectName = projectName.toLowerCase();
-          for (const [collectionKey, artistValue] of Object.entries(knownCollections)) {
-            if (lowercaseProjectName.includes(collectionKey)) {
-              artistName = artistValue;
-              break;
+        // Try to extract artist from traits
+        if (!artistName && osData.traits) {
+          const artistTrait = osData.traits.find(
+            trait => 
+              trait.trait_type?.toLowerCase() === 'artist' || 
+              trait.trait_type?.toLowerCase().includes('artist') ||
+              trait.trait_type?.toLowerCase() === 'created by' ||
+              trait.trait_type?.toLowerCase().includes('creator')
+          );
+          
+          if (artistTrait?.value) {
+            artistName = artistTrait.value;
+          }
+          
+          // Look for specific Art Blocks traits that might have artist info
+          if (!artistName) {
+            // Sometimes the trait has project name in it like "Chromie Squiggle"
+            // We'll check all traits for ones with values that might have artist info
+            for (const trait of osData.traits) {
+              if (trait.value && typeof trait.value === 'string') {
+                if (trait.value.toLowerCase().includes('by ')) {
+                  const byParts = trait.value.split('by ');
+                  if (byParts.length > 1) {
+                    artistName = byParts[1].trim();
+                    console.log(`Found artist in trait value: ${artistName}`);
+                    break;
+                  }
+                }
+              }
             }
           }
         }
-      } else {
-        throw new Error('No metadata returned from Alchemy');
-      }
-    } catch (alchemyError) {
-      console.error('Error fetching from Alchemy:', alchemyError.message);
-      
-      try {
-        // Fallback to OpenSea API
-        console.log(`Trying OpenSea API for token ${tokenId}`);
-        const osResponse = await axios.get(
-          `https://api.opensea.io/api/v2/chain/ethereum/contract/${normalizedAddress}/nfts/${tokenId}`,
-          { headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY } }
-        );
         
-        console.log('OpenSea API response:', JSON.stringify(osResponse.data, null, 2));
-        
-        if (osResponse.data) {
-          const osData = osResponse.data;
-          projectName = osData.name || osData.collection?.name || `Art Blocks #${projectId}`;
-          
-          // Try to extract artist from traits
-          const artistTrait = osData.traits?.find(
-            trait => trait.trait_type?.toLowerCase() === 'artist'
-          );
-          
-          artistName = artistTrait?.value || 'Unknown Artist';
-        } else {
-          throw new Error('No data returned from OpenSea');
-        }
-      } catch (osError) {
-        console.error('Error fetching from OpenSea:', osError.message);
-        
-        // Final fallback to hardcoded values
-        const contractProjects = projectInfo[normalizedAddress] || {};
-        const project = contractProjects[projectId];
-        
-        if (project) {
-          projectName = project.name;
-          artistName = project.artist;
-        } else {
-          // If we have a Flagship V0 contract and projectId 0, it's a Chromie Squiggle
-          if (normalizedAddress === '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a' && projectId === 0) {
-            projectName = 'Chromie Squiggle';
-            artistName = 'Snowfro';
-          } else {
-            const contractType = contractNames[normalizedAddress] || 'Art Blocks';
-            projectName = `${contractType} #${projectId}`;
-            artistName = 'Unknown Artist';
+        // Try to find artist in description
+        if (!artistName && osData.description) {
+          const desc = osData.description.toLowerCase();
+          const byMatch = desc.match(/by\s+([a-z0-9\s]+)/i);
+          if (byMatch && byMatch[1]) {
+            artistName = byMatch[1].trim();
+            console.log(`Found artist in description: ${artistName}`);
           }
         }
+        
+        if (!description) {
+          description = osData.description || '';
+        }
+        
+        console.log(`OpenSea token API returned - Project: ${projectName}, Artist: ${artistName}`);
       }
+    } catch (osTokenError) {
+      console.error('Error fetching from OpenSea token API:', osTokenError.message);
+      
+      // 4. If token-level data fails, try collection-level data
+      if (!projectName || !artistName) {
+        const osCollectionData = await getOpenSeaCollectionInfo(normalizedAddress);
+        
+        if (osCollectionData && osCollectionData.success) {
+          if (!projectName) projectName = osCollectionData.name || '';
+          
+          // Try to find artist in collection description
+          if (!artistName && osCollectionData.description) {
+            const desc = osCollectionData.description.toLowerCase();
+            const byMatch = desc.match(/by\s+([a-z0-9\s]+)/i);
+            if (byMatch && byMatch[1]) {
+              artistName = byMatch[1].trim();
+              console.log(`Found artist in collection description: ${artistName}`);
+            }
+          }
+          
+          console.log(`OpenSea collection API returned - Project: ${projectName}, Artist: ${artistName}`);
+        }
+      }
+    }
+  }
+  
+  // 5. Final fallback to contract name if we still don't have a project name
+  if (!projectName) {
+    const contractType = contractNames[normalizedAddress] || 'Art Blocks';
+    projectName = `${contractType} Project #${projectId}`;
+  }
+  
+  // 6. Final fallback for artist name - extract from name or description 
+  if (!artistName) {
+    // Try to extract from project name if it follows "Name by Artist" pattern
+    if (projectName) {
+      const nameParts = projectName.match(/(.*) by (.*)/i);
+      if (nameParts && nameParts.length > 2) {
+        artistName = nameParts[2].trim();
+        console.log(`Found artist in project name: ${artistName}`);
+      }
+    }
+    
+    // Try to extract from description
+    if (!artistName && description) {
+      const descMatch = description.match(/by\s+([a-z0-9\s]+)/i);
+      if (descMatch && descMatch[1]) {
+        artistName = descMatch[1].trim();
+        console.log(`Found artist in description: ${artistName}`);
+      }
+    }
+    
+    // If still no artist, label as unknown
+    if (!artistName) {
+      artistName = 'Unknown Artist';
     }
   }
   
@@ -803,8 +884,8 @@ async function getProjectDetails(tokenId, contractAddress) {
   const result = {
     projectId,
     tokenNumber,
-    projectName,
-    artistName,
+    projectName: projectName.trim(),
+    artistName: artistName.trim(),
     contractAddress: normalizedAddress,
     artBlocksUrl: `https://www.artblocks.io/token/${normalizedAddress}/${tokenId}`
   };
@@ -815,7 +896,7 @@ async function getProjectDetails(tokenId, contractAddress) {
     timestamp: Date.now()
   };
   
-  console.log(`Project: ${result.projectName}, Artist: ${result.artistName}, Token: ${result.tokenNumber}`);
+  console.log(`Final metadata - Project: ${result.projectName}, Artist: ${result.artistName}, Token: ${result.tokenNumber}`);
   
   return result;
 }
@@ -1041,7 +1122,7 @@ async function processTransaction(tx, contractAddress) {
     
     if (transferEvents.length === 0) {
       console.log('No Transfer events found in transaction');
-      return;
+      return false;
     }
     
     // Get the last Transfer event (usually the most relevant one for sales)
@@ -1188,7 +1269,7 @@ async function processTransaction(tx, contractAddress) {
     tweetText += `\nsold for ${formatPrice(priceEth)} ETH`;
     
     if (usdPrice) {
-      tweetText += ` (${formatPrice(usdPrice)})`;
+      tweetText += ` ($${formatPrice(usdPrice)})`;
     }
     
     tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
@@ -1196,8 +1277,6 @@ async function processTransaction(tx, contractAddress) {
     console.log('\n--- TWEET PREVIEW ---\n');
     console.log(tweetText);
     console.log('\n---------------------\n');
-    
-    console.log('Final tweet text:', tweetText);
     
     // Add tweet to queue instead of sending immediately
     queueTweet(tweetText);
@@ -1390,11 +1469,14 @@ async function testTransactionOutput(txHash, contractAddress) {
     }
     
     // Format tweet
-    let tweetText = `${details.projectName} #${details.tokenNumber} by ${details.artistName}`;
+    // Make sure the project name doesn't already contain the token number
+    const projectName = details.projectName.replace(/ #\d+$/, '');
+    
+    let tweetText = `${projectName} #${details.tokenNumber} by ${details.artistName}`;
     tweetText += `\nsold for ${formatPrice(priceEth)} ETH`;
     
     if (usdPrice) {
-      tweetText += ` (${formatPrice(usdPrice)})`;
+      tweetText += ` ($${formatPrice(usdPrice)})`;
     }
     
     tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
