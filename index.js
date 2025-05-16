@@ -1446,6 +1446,7 @@ class ServerManager {
   handleTestOutput(req, res) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const txHash = url.searchParams.get('hash');
+    const forceRefresh = url.searchParams.get('refresh') === 'true';
     
     if (!txHash) {
       res.writeHead(400, {'Content-Type': 'text/plain'});
@@ -1453,7 +1454,7 @@ class ServerManager {
       return;
     }
     
-    console.log(`Testing output for hash: ${txHash}`);
+    console.log(`Testing output for hash: ${txHash}, force refresh: ${forceRefresh}`);
     
     // First get the transaction to determine which contract is involved
     this.api.alchemy.core.getTransactionReceipt(txHash)
@@ -1482,6 +1483,34 @@ class ServerManager {
           throw new Error('No events from monitored Art Blocks contracts found in this transaction');
         }
         
+        // Clear cache if forced refresh is requested
+        if (forceRefresh) {
+          console.log("Force refresh requested - clearing metadata cache before processing");
+          
+          // Find the token ID in the logs
+          const transferEvents = receipt.logs.filter(log => {
+            const isFromMonitoredContract = log.address.toLowerCase() === foundContract.toLowerCase();
+            const isTransferEvent = log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+            return isFromMonitoredContract && isTransferEvent;
+          });
+          
+          if (transferEvents.length > 0) {
+            const transferEvent = transferEvents[transferEvents.length - 1];
+            let tokenId;
+            if (transferEvent.topics.length > 3) {
+              tokenId = parseInt(transferEvent.topics[3], 16);
+            } else {
+              tokenId = parseInt(transferEvent.data, 16);
+            }
+            
+            const cacheKey = `${foundContract.toLowerCase()}-${tokenId}`;
+            if (this.api.tokenMetadataCache[cacheKey]) {
+              delete this.api.tokenMetadataCache[cacheKey];
+              console.log(`Cleared cache for ${cacheKey}`);
+            }
+          }
+        }
+        
         // Now process with the detected contract
         return this.txProcessor.testTransactionOutput(txHash, foundContract);
       })
@@ -1504,6 +1533,7 @@ class ServerManager {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const tokenId = url.searchParams.get('tokenId');
     const contractAddress = url.searchParams.get('contract') || this.config.CONTRACT_ADDRESSES[0];
+    const forceRefresh = url.searchParams.get('refresh') === 'true';
     
     if (!tokenId) {
       res.writeHead(400, {'Content-Type': 'text/plain'});
@@ -1511,7 +1541,16 @@ class ServerManager {
       return;
     }
     
-    console.log(`Testing metadata retrieval for token: ${tokenId} on contract: ${contractAddress}`);
+    console.log(`Testing metadata retrieval for token: ${tokenId} on contract: ${contractAddress}, force refresh: ${forceRefresh}`);
+    
+    // Clear cache for this token if forced refresh is requested
+    if (forceRefresh) {
+      const cacheKey = `${contractAddress.toLowerCase()}-${tokenId}`;
+      if (this.api.tokenMetadataCache[cacheKey]) {
+        delete this.api.tokenMetadataCache[cacheKey];
+        console.log(`Cleared cache for ${cacheKey}`);
+      }
+    }
     
     this.metadata.getProjectDetails(tokenId, contractAddress)
       .then(details => {
@@ -1590,7 +1629,28 @@ class ServerManager {
   }
 
   handleClearCache(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tokenId = url.searchParams.get('tokenId');
+    const contractAddress = url.searchParams.get('contract');
+    
+    if (tokenId && contractAddress) {
+      // Clear specific token cache
+      const cacheKey = `${contractAddress.toLowerCase()}-${tokenId}`;
+      if (this.api.tokenMetadataCache[cacheKey]) {
+        delete this.api.tokenMetadataCache[cacheKey];
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end(`Cache cleared for specific token: ${contractAddress}/${tokenId}`);
+        return;
+      } else {
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end(`No cache found for token: ${contractAddress}/${tokenId}`);
+        return;
+      }
+    }
+    
+    // Clear all caches
     this.api.clearCaches();
+    
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('All caches have been cleared.');
   }
