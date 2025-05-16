@@ -916,6 +916,7 @@ class TweetManager {
         
         // Special handling for rate limits
         if (error.code === 429 || error.message.includes('rate limit') || error.message.includes('429')) {
+          // Fixed delay calculation - ensure we have a number
           const delaySeconds = attempt * 120; // 2, 4, 6 minutes between retries
           console.error(`Rate limit exceeded (attempt ${attempt}). Will retry after ${delaySeconds} seconds.`);
           
@@ -932,7 +933,9 @@ class TweetManager {
       maxTimeout: 360000, // 6 minutes max
       factor: 2, // Exponential backoff factor
       onRetry: (error) => {
-        const seconds = Math.min(60 * error.attemptNumber, 360);
+        // Ensure we have a valid number for attempt
+        const attemptNumber = error.attemptNumber || 1;
+        const seconds = Math.min(60 * attemptNumber, 360);
         console.log(`Retrying tweet after ${seconds} seconds due to error: ${error.message}`);
       }
     });
@@ -956,9 +959,11 @@ class TweetManager {
     }
     
     // Don't process queue during initial startup delay
-    if (Date.now() - this.appStartTime < this.config.INITIAL_STARTUP_DELAY) {
-      console.log("App recently started; waiting before processing tweet queue");
-      setTimeout(() => this.processTweetQueue(), 60000);
+    const now = Date.now();
+    if (now - this.appStartTime < this.config.INITIAL_STARTUP_DELAY) {
+      const remainingDelay = Math.ceil((this.config.INITIAL_STARTUP_DELAY - (now - this.appStartTime)) / 1000);
+      console.log(`App recently started; waiting another ${remainingDelay} seconds before processing tweet queue`);
+      setTimeout(() => this.processTweetQueue(), 60000); // Check again in 1 minute
       return;
     }
     
@@ -970,18 +975,22 @@ class TweetManager {
       if (!twitterReady) {
         console.log("Twitter appears to be rate limited. Delaying queue processing.");
         setTimeout(() => this.processTweetQueue(), 5 * 60 * 1000);
+        this.isTweetProcessing = false;
         return;
       }
       
       // Check if we need to wait before sending next tweet
-      const now = Date.now();
       const timeSinceLastTweet = now - this.lastTweetTime;
       
       if (timeSinceLastTweet < this.config.MIN_TIME_BETWEEN_TWEETS && this.lastTweetTime > 0) {
         const waitTime = this.config.MIN_TIME_BETWEEN_TWEETS - timeSinceLastTweet;
         const waitMinutes = Math.ceil(waitTime / 60000);
         console.log(`Waiting ${waitMinutes} minutes before sending next tweet due to rate limiting...`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
+        
+        // Release the processing lock and try again later
+        this.isTweetProcessing = false;
+        setTimeout(() => this.processTweetQueue(), waitTime);
+        return;
       }
       
       // Get next tweet from queue
@@ -996,8 +1005,10 @@ class TweetManager {
       
       // Send the tweet
       try {
+        console.log("Attempting to send tweet now...");
         await this.sendTweet(message);
         this.tweetFailures = 0; // Reset on success
+        console.log("Tweet sent successfully!");
       } catch (error) {
         this.tweetFailures++;
         console.error(`Tweet failed (total failures: ${this.tweetFailures}):`, error);
@@ -1015,8 +1026,11 @@ class TweetManager {
       
       // Process next tweet if available
       if (this.tweetQueue.length > 0) {
-        const nextDelay = this.tweetFailures > 0 ? 5 * 60 * 1000 : 1000;
+        const nextDelay = this.tweetFailures > 0 ? 5 * 60 * 1000 : 60 * 1000; // 5 min if failures, 1 min otherwise
+        console.log(`Scheduling next tweet attempt in ${nextDelay/60000} minutes...`);
         setTimeout(() => this.processTweetQueue(), nextDelay);
+      } else {
+        console.log("Tweet queue is empty. Waiting for new tweets to process.");
       }
     }
   }
