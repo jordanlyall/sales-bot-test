@@ -1,34 +1,225 @@
 /**
  * Art Blocks Sales Bot
  * 
- * Enhanced version with improved metadata extraction from APIs
- * INTEGRATION GUIDE: Replace the methods within their respective classes
+ * Monitors OpenSea sales of Art Blocks NFTs and posts updates to Twitter.
+ * Uses a hybrid approach with OpenSea for sales events and metadata,
+ * and Alchemy as a blockchain monitor and fallback.
  */
 
-// =========================================================
-// INTEGRATION INSTRUCTIONS
-// =========================================================
-/**
- * How to integrate these changes:
- * 
- * 1. DO NOT paste this entire file into your codebase - it will cause syntax errors!
- * 2. For each class section below, locate the corresponding class in your codebase
- * 3. Replace only the specific methods with the enhanced versions
- * 4. For new methods/endpoints, add them to the appropriate classes
- * 5. Update routing in setupServer() to include the new endpoints
- */
+// Core modules
+const http = require('http');
+const { TwitterApi } = require('twitter-api-v2');
+const { Alchemy, Network } = require('alchemy-sdk');
+const retry = require('async-retry');
+const axios = require('axios');
+require('dotenv').config();
 
 // =========================================================
-// API SERVICES CLASS - METHOD REPLACEMENTS
+// CONFIGURATION
 // =========================================================
 
-/**
- * FIND YOUR ApiServices CLASS AND REPLACE THESE METHODS
- */
+class Config {
+  constructor() {
+    this.CONTRACT_ADDRESSES = [
+      '0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a', // Art Blocks Flagship V0
+      '0xa7d8d9ef8D8Ce8992Df33D8b8CF4Aebabd5bD270', // Art Blocks Flagship V1
+      '0x99a9B7c1116f9ceEB1652de04d5969CcE509B069', // Art Blocks Flagship V3
+      '0xAB0000000000aa06f89B268D604a9c1C41524Ac6', // Art Blocks Curated V3.2
+      '0x145789247973c5d612bf121e9e4eef84b63eb707', // Art Blocks Collaborations
+      '0x64780ce53f6e966e18a22af13a2f97369580ec11', // Art Blocks Collaborations
+      '0x942bc2d3e7a589fe5bd4a5c6ef9727dfd82f5c8a', // Art Blocks Explorations
+      '0xea698596b6009a622c3ed00dd5a8b5d1cae4fc36', // Art Blocks Collaborations
+    ];
+    
+    // OpenSea collection slugs for Art Blocks collections
+    this.OPENSEA_COLLECTION_SLUGS = [
+      'art-blocks',
+      'art-blocks-factory',
+      'art-blocks-curated',
+      'art-blocks-playground',
+      'art-blocks-explorations'
+    ];
+    
+    this.OPENSEA_ADDRESS = '0x7f268357a8c2552623316e2562d90e642bb538e5';
+    this.MIN_PRICE_ETH = 0.001;
+    this.HEALTH_CHECK_INTERVAL = 3600000; // 1 hour
+    this.MAX_RETRIES = 3;
+    this.RETRY_DELAY = 60000; // 1 minute
+    this.ETH_PRICE_CACHE_DURATION = 900000; // 15 minutes
+    this.MIN_TIME_BETWEEN_TWEETS = 15 * 60 * 1000; // 15 minutes
+    this.DISABLE_TWEETS = true; // Set to false to enable actual tweets
+    this.INITIAL_STARTUP_DELAY = 300000; // 5 minutes
+    this.NFT_METADATA_CACHE_DURATION = 24 * 60 * 60 * 1000; // 1 day
+    this.OPENSEA_EVENTS_POLL_INTERVAL = 60000; // 1 minute
+    this.OPENSEA_RATE_LIMIT_DELAY = 500; // 500ms between API calls (2 req/s)
+
+    // Contract name mapping
+    this.CONTRACT_NAMES = {
+      '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a': 'Art Blocks Flagship V0',
+      '0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270': 'Art Blocks Flagship V1',
+      '0x99a9b7c1116f9ceeb1652de04d5969cce509b069': 'Art Blocks Flagship V3',
+      '0xab0000000000aa06f89b268d604a9c1c41524ac6': 'Art Blocks Curated V3.2',
+      '0x145789247973c5d612bf121e9e4eef84b63eb707': 'Art Blocks Collaborations',
+      '0x64780ce53f6e966e18a22af13a2f97369580ec11': 'Art Blocks Collaborations',
+      '0x942bc2d3e7a589fe5bd4a5c6ef9727dfd82f5c8a': 'Art Blocks Explorations',
+      '0xea698596b6009a622c3ed00dd5a8b5d1cae4fc36': 'Art Blocks Collaborations',
+    };
+
+    // OpenSea URL mapping
+    this.CONTRACT_URLS = {};
+    this.CONTRACT_ADDRESSES.forEach(address => {
+      const normalizedAddress = address.toLowerCase();
+      this.CONTRACT_URLS[normalizedAddress] = `https://opensea.io/assets/ethereum/${normalizedAddress}/`;
+    });
+  }
+}
+
+// =========================================================
+// API SERVICES
+// =========================================================
+
 class ApiServices {
-  // Your existing constructor and other methods...
-  
-  // REPLACE this method in your ApiServices class
+  constructor(config) {
+    this.config = config;
+    this.ethPriceCache = { price: null, timestamp: 0 };
+    this.tokenMetadataCache = {};
+    this.processedEventIds = new Set(); // Track which OpenSea events we've processed
+    this.lastEventTimestamp = Date.now() - (24 * 60 * 60 * 1000); // Start with events from last 24h
+  }
+
+  initTwitter() {
+    try {
+      this.twitter = new TwitterApi({
+        appKey: process.env.TWITTER_CONSUMER_KEY,
+        appSecret: process.env.TWITTER_CONSUMER_SECRET,
+        accessToken: process.env.TWITTER_ACCESS_TOKEN,
+        accessSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET,
+      });
+      console.log('Twitter client initialized successfully');
+      return true;
+    } catch (error) {
+      console.error('Error initializing Twitter client:', error);
+      return false;
+    }
+  }
+
+  initAlchemy() {
+    try {
+      this.alchemy = new Alchemy({
+        apiKey: process.env.ALCHEMY_API_KEY,
+        network: Network.ETH_MAINNET,
+      });
+      console.log('Alchemy client initialized successfully');
+      return true;
+    } catch (error) {
+      console.error('Error initializing Alchemy client:', error);
+      return false;
+    }
+  }
+
+  async getEthPrice() {
+    // Check cache first
+    const now = Date.now();
+    if (this.ethPriceCache.price && 
+        (now - this.ethPriceCache.timestamp < this.config.ETH_PRICE_CACHE_DURATION)) {
+      return this.ethPriceCache.price;
+    }
+
+    try {
+      // Try multiple price sources in sequence
+      
+      // First try CoinGecko
+      try {
+        const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
+          params: { ids: 'ethereum', vs_currencies: 'usd' }
+        });
+        
+        if (response.data?.ethereum?.usd) {
+          const ethPrice = response.data.ethereum.usd;
+          console.log(`Got ETH price from CoinGecko API: $${ethPrice}`);
+          
+          // Update cache
+          this.ethPriceCache = { price: ethPrice, timestamp: now };
+          return ethPrice;
+        }
+      } catch (coinGeckoError) {
+        console.error('CoinGecko API error:', coinGeckoError.message);
+      }
+      
+      // If CoinGecko failed, try CryptoCompare as fallback
+      try {
+        const response = await axios.get('https://min-api.cryptocompare.com/data/price', {
+          params: { fsym: 'ETH', tsyms: 'USD' }
+        });
+        
+        if (response.data?.USD) {
+          const ethPrice = response.data.USD;
+          console.log(`Got ETH price from CryptoCompare API: $${ethPrice}`);
+          
+          // Update cache
+          this.ethPriceCache = { price: ethPrice, timestamp: now };
+          return ethPrice;
+        }
+      } catch (cryptoCompareError) {
+        console.error('CryptoCompare API error:', cryptoCompareError.message);
+      }
+      
+      // Last resort - try Binance API
+      try {
+        const response = await axios.get('https://api.binance.com/api/v3/ticker/price', {
+          params: { symbol: 'ETHUSDT' }
+        });
+        
+        if (response.data?.price) {
+          const ethPrice = parseFloat(response.data.price);
+          console.log(`Got ETH price from Binance API: $${ethPrice}`);
+          
+          // Update cache
+          this.ethPriceCache = { price: ethPrice, timestamp: now };
+          return ethPrice;
+        }
+      } catch (binanceError) {
+        console.error('Binance API error:', binanceError.message);
+      }
+      
+      // If all APIs failed, fall back to cached price or default
+      console.error('All ETH price APIs failed, using fallback price');
+      return this.ethPriceCache.price || 2500; // More reasonable fallback
+      
+    } catch (error) {
+      console.error('Error fetching ETH price:', error.message);
+      return this.ethPriceCache.price || 2500;
+    }
+  }
+
+  async getEnsName(address) {
+    try {
+      const ensName = await this.alchemy.core.lookupAddress(address);
+      console.log(`ENS lookup for ${address}: ${ensName || 'Not found'}`);
+      return ensName;
+    } catch (error) {
+      console.error('Error getting ENS name:', error);
+      return null;
+    }
+  }
+
+  async getOpenseaUserName(address) {
+    try {
+      console.log(`Looking up OpenSea username for address: ${address}`);
+      
+      const response = await axios.get(`https://api.opensea.io/api/v2/accounts/${address}`, {
+        headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY }
+      });
+      
+      const username = response.data.username || null;
+      console.log(`Found OpenSea username: ${username || 'None'}`);
+      return username;
+    } catch (error) {
+      console.error(`Error getting OpenSea username: ${error.message}`);
+      return null;
+    }
+  }
+
   async getOpenSeaAssetMetadata(contractAddress, tokenId) {
     try {
       console.log(`Fetching OpenSea metadata for ${contractAddress}/${tokenId}`);
@@ -132,7 +323,6 @@ class ApiServices {
     }
   }
 
-  // REPLACE this method in your ApiServices class
   async getArtBlocksTokenInfo(tokenId, contractAddress) {
     try {
       console.log(`Fetching from Art Blocks API for token ${tokenId}`);
@@ -236,7 +426,6 @@ class ApiServices {
     }
   }
 
-  // REPLACE this method in your ApiServices class
   async getAlchemyMetadata(contractAddress, tokenId) {
     try {
       console.log(`Fetching NFT metadata from Alchemy for token ${tokenId}`);
@@ -298,20 +487,138 @@ class ApiServices {
     }
   }
 
-  // Your other existing methods...
+  _extractArtistFromAlchemy(nftMetadata) {
+    if (!nftMetadata) return null;
+    
+    // Method 1: Check for an attribute with trait_type "artist"
+    const artistAttribute = nftMetadata.rawMetadata?.attributes?.find(
+      attr => attr.trait_type?.toLowerCase() === 'artist' || 
+             attr.trait_type?.toLowerCase() === 'created by'
+    );
+    
+    if (artistAttribute?.value) {
+      return artistAttribute.value;
+    }
+    
+    // Method 2: Look for any attribute containing the word "artist" or "creator"
+    const artistLikeAttribute = nftMetadata.rawMetadata?.attributes?.find(
+      attr => 
+        (attr.trait_type && (
+          attr.trait_type.toLowerCase().includes('artist') || 
+          attr.trait_type.toLowerCase().includes('creator') ||
+          attr.trait_type.toLowerCase().includes('author')
+        )) ||
+        (attr.key && (
+          attr.key.toLowerCase().includes('artist') ||
+          attr.key.toLowerCase().includes('creator') ||
+          attr.key.toLowerCase().includes('author')
+        ))
+    );
+    
+    if (artistLikeAttribute?.value) {
+      return artistLikeAttribute.value;
+    }
+    
+    // Method 3: Check for 'creator' field in the rawMetadata
+    if (nftMetadata.rawMetadata?.creator) {
+      return nftMetadata.rawMetadata.creator;
+    }
+    
+    // Method 4: Check if the title contains "by [name]" pattern
+    if (nftMetadata.title) {
+      const titleMatch = nftMetadata.title.match(/by\s+([a-z0-9\s]+)/i);
+      if (titleMatch && titleMatch[1]) {
+        return titleMatch[1].trim();
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Get OpenSea sales events for Art Blocks collections
+   */
+  async getOpenSeaSalesEvents() {
+    try {
+      console.log(`Fetching OpenSea sales events since ${new Date(this.lastEventTimestamp).toISOString()}`);
+      
+      const newEvents = [];
+      
+      // Process each collection slug
+      for (const collectionSlug of this.config.OPENSEA_COLLECTION_SLUGS) {
+        try {
+          // Using updated OpenSea API v2 endpoint format and parameters
+          const response = await axios.get(
+            `https://api.opensea.io/api/v2/events`, {
+              headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY },
+              params: {
+                collection_slug: collectionSlug,
+                event_type: 'sale',
+                after: Math.floor(this.lastEventTimestamp / 1000), // Unix timestamp in seconds
+                limit: 50
+              }
+            }
+          );
+          
+          if (response.data && response.data.events) {
+            const events = response.data.events;
+            console.log(`Found ${events.length} events for collection ${collectionSlug}`);
+            
+            // Filter out events we've already processed
+            for (const event of events) {
+              if (!this.processedEventIds.has(event.id)) {
+                newEvents.push(event);
+                this.processedEventIds.add(event.id);
+                
+                // Update last event timestamp if this is more recent
+                const eventTimestamp = new Date(event.created_date || event.timestamp).getTime();
+                if (eventTimestamp > this.lastEventTimestamp) {
+                  this.lastEventTimestamp = eventTimestamp;
+                }
+              }
+            }
+          }
+          
+          // Respect rate limits
+          await new Promise(resolve => setTimeout(resolve, this.config.OPENSEA_RATE_LIMIT_DELAY));
+          
+        } catch (error) {
+          console.error(`Error fetching events for ${collectionSlug}:`, error.message);
+          // Log more detailed error info
+          if (error.response) {
+            console.error(`Response status: ${error.response.status}`);
+            console.error(`Response data:`, JSON.stringify(error.response.data, null, 2));
+          }
+          // Continue with next collection
+        }
+      }
+      
+      console.log(`Found ${newEvents.length} new sales events`);
+      return newEvents;
+      
+    } catch (error) {
+      console.error('Error fetching OpenSea events:', error.message);
+      return [];
+    }
+  }
+
+  clearCaches() {
+    this.tokenMetadataCache = {};
+    this.ethPriceCache = { price: null, timestamp: 0 };
+    return true;
+  }
 }
 
 // =========================================================
-// METADATA MANAGER CLASS - METHOD REPLACEMENTS
+// METADATA MANAGER
 // =========================================================
 
-/**
- * FIND YOUR MetadataManager CLASS AND REPLACE THIS METHOD
- */
 class MetadataManager {
-  // Your existing constructor and other methods...
+  constructor(apiServices, config) {
+    this.api = apiServices;
+    this.config = config;
+  }
 
-  // REPLACE this method in your MetadataManager class
   async getProjectDetails(tokenId, contractAddress) {
     const normalizedAddress = contractAddress.toLowerCase();
     const cacheKey = `${normalizedAddress}-${tokenId}`;
@@ -468,103 +775,652 @@ class MetadataManager {
     
     return result;
   }
-
-  // Your other existing methods...
 }
 
 // =========================================================
-// SERVER MANAGER CLASS - NEW METHOD & UPDATES
+// TWEET MANAGER
 // =========================================================
 
-/**
- * FIND YOUR ServerManager CLASS AND ADD THIS NEW METHOD
- */
-class ServerManager {
-  // Your existing constructor and other methods...
+class TweetManager {
+  constructor(apiServices, config) {
+    this.api = apiServices;
+    this.config = config;
+    this.tweetQueue = [];
+    this.isTweetProcessing = false;
+    this.lastTweetTime = 0;
+    this.tweetFailures = 0;
+    this.lastRateLimitTime = 0;
+    this.appStartTime = Date.now();
+  }
 
-  // ADD this new method to your ServerManager class
-  handleApiTest(req, res) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const tokenId = url.searchParams.get('tokenId');
-    const contractAddress = url.searchParams.get('contract') || this.config.CONTRACT_ADDRESSES[0];
-    const api = url.searchParams.get('api') || 'all'; // opensea, artblocks, alchemy, or all
+  formatAddress(address) {
+    if (!address) return 'Unknown';
+    return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
+  }
+
+  formatPrice(price) {
+    return price.toLocaleString('en-US', { 
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
+  }
+
+  async checkTwitterStatus() {
+    // Check if we're still in a rate limit cooldown
+    const now = Date.now();
+    const timeSinceLastRateLimit = now - this.lastRateLimitTime;
     
-    if (!tokenId) {
-      res.writeHead(400, {'Content-Type': 'text/plain'});
-      res.end('Error: Missing tokenId. Use ?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&api=opensea in the URL');
+    if (this.lastRateLimitTime > 0 && timeSinceLastRateLimit < 30 * 60 * 1000) {
+      const remainingCooldown = 30 * 60 * 1000 - timeSinceLastRateLimit;
+      const minutes = Math.ceil(remainingCooldown / 60000);
+      console.log(`Twitter appears to be rate limited. Recommended to wait ${minutes} more minutes.`);
+      return false;
+    }
+    
+    return true;
+  }
+
+  async sendTweet(message) {
+    // Preview mode if tweets are disabled
+    if (this.config.DISABLE_TWEETS) {
+      console.log('\n--- TWEET PREVIEW (DISABLED) ---\n');
+      console.log(message);
+      console.log('\n---------------------\n');
+      
+      return { data: { id: 'preview-only-' + Date.now() } };
+    }
+    
+    // Proceed with actual tweeting
+    if (!this.api.twitter) {
+      console.error('Cannot send tweet - Twitter client not initialized');
+      return null;
+    }
+
+    return retry(async (bail, attempt) => {
+      try {
+        console.log(`Attempting to tweet (attempt ${attempt})...`);
+        const tweet = await this.api.twitter.v2.tweet(message);
+        console.log('Tweet sent successfully:', tweet.data.id);
+        return tweet;
+      } catch (error) {
+        // Don't retry permission issues
+        if (error.code === 403) {
+          console.error('Permission error when tweeting:', error.message);
+          bail(error);
+          return null;
+        }
+        
+        // Special handling for rate limits
+        if (error.code === 429 || error.message.includes('rate limit') || error.message.includes('429')) {
+          const delaySeconds = attempt * 120; // 2, 4, 6 minutes between retries
+          console.error(`Rate limit exceeded (attempt ${attempt}). Will retry after ${delaySeconds} seconds.`);
+          
+          this.lastRateLimitTime = Date.now();
+          await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+        }
+        
+        console.error(`Tweet attempt ${attempt} failed:`, error.message);
+        throw error; // Trigger retry
+      }
+    }, {
+      retries: this.config.MAX_RETRIES,
+      minTimeout: this.config.RETRY_DELAY,
+      maxTimeout: 360000, // 6 minutes max
+      factor: 2, // Exponential backoff factor
+      onRetry: (error) => {
+        const seconds = Math.min(60 * error.attemptNumber, 360);
+        console.log(`Retrying tweet after ${seconds} seconds due to error: ${error.message}`);
+      }
+    });
+  }
+
+  queueTweet(message) {
+    console.log('Adding tweet to queue:', message);
+    this.tweetQueue.push(message);
+    
+    // Start processing if not already running
+    if (!this.isTweetProcessing) {
+      this.processTweetQueue();
+    }
+    
+    return true;
+  }
+
+  async processTweetQueue() {
+    if (this.isTweetProcessing || this.tweetQueue.length === 0) {
       return;
     }
     
-    console.log(`API test request for tokenId: ${tokenId}, contract: ${contractAddress}, api: ${api}`);
-    
-    let promises = [];
-    let results = {};
-    
-    if (api === 'opensea' || api === 'all') {
-      promises.push(
-        this.api.getOpenSeaAssetMetadata(contractAddress, tokenId)
-          .then(data => {
-            results.opensea = data;
-          })
-          .catch(error => {
-            results.opensea = { success: false, error: error.message };
-          })
-      );
+    // Don't process queue during initial startup delay
+    if (Date.now() - this.appStartTime < this.config.INITIAL_STARTUP_DELAY) {
+      console.log("App recently started; waiting before processing tweet queue");
+      setTimeout(() => this.processTweetQueue(), 60000);
+      return;
     }
     
-    if (api === 'artblocks' || api === 'all') {
-      promises.push(
-        this.api.getArtBlocksTokenInfo(tokenId, contractAddress)
-          .then(data => {
-            results.artblocks = data;
-          })
-          .catch(error => {
-            results.artblocks = { success: false, error: error.message };
-          })
-      );
-    }
+    this.isTweetProcessing = true;
     
-    if (api === 'alchemy' || api === 'all') {
-      promises.push(
-        this.api.getAlchemyMetadata(contractAddress, tokenId)
-          .then(data => {
-            results.alchemy = data;
-          })
-          .catch(error => {
-            results.alchemy = { success: false, error: error.message };
-          })
-      );
+    try {
+      // Check Twitter status first
+      const twitterReady = await this.checkTwitterStatus();
+      if (!twitterReady) {
+        console.log("Twitter appears to be rate limited. Delaying queue processing.");
+        setTimeout(() => this.processTweetQueue(), 5 * 60 * 1000);
+        return;
+      }
+      
+      // Check if we need to wait before sending next tweet
+      const now = Date.now();
+      const timeSinceLastTweet = now - this.lastTweetTime;
+      
+      if (timeSinceLastTweet < this.config.MIN_TIME_BETWEEN_TWEETS && this.lastTweetTime > 0) {
+        const waitTime = this.config.MIN_TIME_BETWEEN_TWEETS - timeSinceLastTweet;
+        const waitMinutes = Math.ceil(waitTime / 60000);
+        console.log(`Waiting ${waitMinutes} minutes before sending next tweet due to rate limiting...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+      
+      // Get next tweet from queue
+      const message = this.tweetQueue.shift();
+      
+      // Add extra delay if we've had failures
+      if (this.tweetFailures > 0) {
+        const extraDelay = this.tweetFailures * 3 * 60 * 1000; // 3, 6, 9 minutes based on failures
+        console.log(`Adding extra ${extraDelay/60000} minutes delay due to previous ${this.tweetFailures} failed attempts`);
+        await new Promise(resolve => setTimeout(resolve, extraDelay));
+      }
+      
+      // Send the tweet
+      try {
+        await this.sendTweet(message);
+        this.tweetFailures = 0; // Reset on success
+      } catch (error) {
+        this.tweetFailures++;
+        console.error(`Tweet failed (total failures: ${this.tweetFailures}):`, error);
+        // Put message back in queue if not a permanent error
+        if (!error.message.includes('403')) {
+          this.tweetQueue.unshift(message);
+        }
+      }
+      
+      this.lastTweetTime = Date.now();
+    } catch (error) {
+      console.error('Error processing tweet queue:', error);
+    } finally {
+      this.isTweetProcessing = false;
+      
+      // Process next tweet if available
+      if (this.tweetQueue.length > 0) {
+        const nextDelay = this.tweetFailures > 0 ? 5 * 60 * 1000 : 1000;
+        setTimeout(() => this.processTweetQueue(), nextDelay);
+      }
     }
-    
-    Promise.all(promises)
-      .then(() => {
-        // Add a summary section to make comparison easier
-        results.summary = {
-          tokenId: tokenId,
-          contract: contractAddress,
-          apisChecked: api,
-          projectNames: {
-            opensea: results.opensea?.projectName || 'Not available',
-            artblocks: results.artblocks?.projectName || 'Not available',
-            alchemy: results.alchemy?.projectName || 'Not available'
-          },
-          artistNames: {
-            opensea: results.opensea?.artistName || 'Not available',
-            artblocks: results.artblocks?.artistName || 'Not available',
-            alchemy: results.alchemy?.artistName || 'Not available'
-          }
-        };
-        
-        res.writeHead(200, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify(results, null, 2));
-      })
-      .catch(err => {
-        res.writeHead(500, {'Content-Type': 'text/plain'});
-        res.end('Error: ' + err.message);
-      });
   }
 
-  // UPDATE this method in your ServerManager class to add the new endpoint
+  async sendTestTweet() {
+    return this.queueTweet(`Art Blocks sales bot is monitoring OpenSea sales for ${this.config.CONTRACT_ADDRESSES.length} contracts! (${new Date().toLocaleTimeString()})`);
+  }
+
+  async formatSaleTweet(details, priceEth, usdPrice, buyerDisplay) {
+    // Make sure the project name doesn't already contain the token number
+    const projectName = details.projectName.replace(/ #\d+$/, '');
+    
+    // For Art Blocks tokens, the tokenNumber field might have the full ID
+    // We want just the edition number part (the last 6 digits)
+    const tokenNumber = details.tokenNumber % 1000000 || details.tokenNumber;
+    
+    // This is the line that needs to be properly included in the output
+    let tweetText = `${projectName} #${tokenNumber} by ${details.artistName}\n`;
+    
+    // Add price info
+    tweetText += `sold for ${this.formatPrice(priceEth)} ETH`;
+    
+    if (usdPrice) {
+      tweetText += ` ($${this.formatPrice(usdPrice)})`;
+    }
+    
+    // Add buyer info and URL
+    tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
+    
+    // Debug output to verify the tweet format
+    console.log('\n--- FORMATTED TWEET ---\n');
+    console.log(`${projectName} #${tokenNumber} by ${details.artistName}`);
+    console.log(`sold for ${this.formatPrice(priceEth)} ETH${usdPrice ? ` ($${this.formatPrice(usdPrice)})` : ''}`);
+    console.log(`to ${buyerDisplay}`);
+    console.log();
+    console.log(details.artBlocksUrl);
+    console.log('\n---------------------\n');
+    
+    return tweetText;
+  }
+}
+
+// =========================================================
+// OPENSEA EVENTS PROCESSOR
+// =========================================================
+
+class OpenSeaEventProcessor {
+  constructor(apiServices, metadataManager, tweetManager, config) {
+    this.api = apiServices;
+    this.metadata = metadataManager;
+    this.tweets = tweetManager;
+    this.config = config;
+  }
+  
+  /**
+   * Process OpenSea sales events
+   */
+  async processOpenSeaEvents() {
+    try {
+      const events = await this.api.getOpenSeaSalesEvents();
+      
+      if (events.length === 0) {
+        return;
+      }
+      
+      console.log(`Processing ${events.length} OpenSea sales events`);
+      
+      for (const event of events) {
+        try {
+          await this.processSaleEvent(event);
+          // Add a small delay between processing events to avoid rate limits
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (error) {
+          console.error('Error processing sale event:', error);
+          // Continue with next event
+        }
+      }
+    } catch (error) {
+      console.error('Error in processOpenSeaEvents:', error);
+    }
+  }
+  
+  /**
+   * Process a single OpenSea sale event
+   */
+  async processSaleEvent(event) {
+    try {
+      // Check if this is a valid sale event
+      if (!event.payment || !event.nft) {
+        console.log('Invalid sale event - missing payment or NFT data');
+        return false;
+      }
+      
+      // Extract sale information
+      const contractAddress = event.nft.contract;
+      const tokenId = event.nft.identifier;
+      const buyerAddress = event.winner?.address;
+      
+      // Skip if contract address doesn't match our monitored contracts
+      if (!this.config.CONTRACT_ADDRESSES.some(addr => 
+        addr.toLowerCase() === contractAddress.toLowerCase())) {
+        console.log(`Skipping sale for non-monitored contract: ${contractAddress}`);
+        return false;
+      }
+      
+      console.log(`Processing OpenSea sale for ${contractAddress}/${tokenId}`);
+      
+      // Extract price information
+      const priceWei = event.payment.quantity;
+      const priceEth = Number(priceWei) / 1e18;
+      
+      console.log(`Sale price: ${priceEth} ETH`);
+      
+      // Skip if below minimum price
+      if (priceEth < this.config.MIN_PRICE_ETH) {
+        console.log(`Price ${priceEth} ETH is below minimum threshold, skipping`);
+        return false;
+      }
+      
+      // Get project details
+      const details = await this.metadata.getProjectDetails(tokenId, contractAddress);
+      
+      // Get ETH/USD price
+      const ethPrice = await this.api.getEthPrice();
+      const usdPrice = ethPrice ? (priceEth * ethPrice) : null;
+      
+      // Get buyer info
+      let buyerDisplay = this.tweets.formatAddress(buyerAddress);
+      
+      // Try to get ENS name
+      const ensName = await this.api.getEnsName(buyerAddress);
+      if (ensName) {
+        buyerDisplay = ensName;
+      } else {
+        // Try to get OpenSea username
+        const osName = await this.api.getOpenseaUserName(buyerAddress);
+        if (osName) {
+          buyerDisplay = osName;
+        }
+      }
+      
+      // Format tweet
+      const tweetText = await this.tweets.formatSaleTweet(details, priceEth, usdPrice, buyerDisplay);
+      
+      console.log('\n--- TWEET PREVIEW ---\n');
+      console.log(tweetText);
+      console.log('\n---------------------\n');
+      
+      // Queue the tweet
+      this.tweets.queueTweet(tweetText);
+      
+      return true;
+    } catch (error) {
+      console.error('Error processing OpenSea sale event:', error);
+      return false;
+    }
+  }
+  
+  /**
+   * Start polling for OpenSea events
+   */
+  startEventPolling() {
+    console.log('Starting OpenSea events polling');
+    
+    // Process events immediately on startup
+    this.processOpenSeaEvents();
+    
+    // Set up interval to poll for new events
+    setInterval(() => {
+      this.processOpenSeaEvents();
+    }, this.config.OPENSEA_EVENTS_POLL_INTERVAL);
+  }
+}
+
+// =========================================================
+// TRANSACTION PROCESSOR
+// =========================================================
+
+class TransactionProcessor {
+  constructor(apiServices, metadataManager, tweetManager, config) {
+    this.api = apiServices;
+    this.metadata = metadataManager;
+    this.tweets = tweetManager;
+    this.config = config;
+  }
+
+  async processTransaction(tx, contractAddress) {
+    console.log(`Processing transaction for ${contractAddress}: ${tx.hash}`);
+    
+    try {
+      // Get transaction details
+      const transaction = await this.api.alchemy.core.getTransaction(tx.hash);
+      if (!transaction || !transaction.to) {
+        console.log('Transaction not found or invalid');
+        return false;
+      }
+      
+      // Get transaction receipt with logs
+      const receipt = await this.api.alchemy.core.getTransactionReceipt(tx.hash);
+      if (!receipt) {
+        console.log('Receipt not found');
+        return false;
+      }
+      
+      // Look for ERC-721 Transfer event in the logs
+      const transferEvents = receipt.logs.filter(log => {
+        const isFromMonitoredContract = log.address.toLowerCase() === contractAddress.toLowerCase();
+        const isTransferEvent = log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+        return isFromMonitoredContract && isTransferEvent;
+      });
+      
+      if (transferEvents.length === 0) {
+        console.log('No Transfer events found in transaction');
+        return false;
+      }
+      
+      // Get the last Transfer event (usually the most relevant one for sales)
+      const transferEvent = transferEvents[transferEvents.length - 1];
+      
+      // Parse the event data
+      const fromAddress = '0x' + transferEvent.topics[1].slice(26);
+      const toAddress = '0x' + transferEvent.topics[2].slice(26);
+      
+      // Parse tokenId
+      let tokenId;
+      if (transferEvent.topics.length > 3) {
+        tokenId = parseInt(transferEvent.topics[3], 16);
+      } else {
+        tokenId = parseInt(transferEvent.data, 16);
+      }
+      
+      console.log(`Extracted from event - From: ${fromAddress}, To: ${toAddress}, TokenId: ${tokenId}`);
+      
+      // Extract price information
+      const priceEth = await this.extractSalePrice(transaction, receipt);
+      console.log(`Final sale price: ${priceEth} ETH`);
+      
+      // Skip if below minimum price or zero
+      if (priceEth < this.config.MIN_PRICE_ETH || priceEth === 0) {
+        console.log(`Price ${priceEth} ETH is below minimum threshold or zero, skipping`);
+        return false;
+      }
+      
+      // Get project details
+      const details = await this.metadata.getProjectDetails(tokenId, contractAddress);
+      
+      // Get ETH/USD price
+      const ethPrice = await this.api.getEthPrice();
+      const usdPrice = ethPrice ? (priceEth * ethPrice) : null;
+      
+      // Get buyer info
+      let buyerDisplay = this.tweets.formatAddress(toAddress);
+      
+      // Try to get ENS name
+      const ensName = await this.api.getEnsName(toAddress);
+      if (ensName) {
+        buyerDisplay = ensName;
+      } else {
+        // Try to get OpenSea username
+        const osName = await this.api.getOpenseaUserName(toAddress);
+        if (osName) {
+          buyerDisplay = osName;
+        }
+      }
+      
+      // Format tweet
+      const tweetText = await this.tweets.formatSaleTweet(details, priceEth, usdPrice, buyerDisplay);
+      
+      console.log('\n--- TWEET PREVIEW ---\n');
+      console.log(tweetText);
+      console.log('\n---------------------\n');
+      
+      // Queue the tweet
+      this.tweets.queueTweet(tweetText);
+      
+      return true;
+    } catch (error) {
+      console.error('Error processing transaction:', error);
+      return false;
+    }
+  }
+
+  async extractSalePrice(transaction, receipt) {
+    let priceEth = 0;
+    
+    // Method 1: Look for OrderFulfilled events (OpenSea Seaport)
+    const orderFulfilledEvents = receipt.logs.filter(log => {
+      // OrderFulfilled event signature
+      return log.topics[0] === '0x9d9af8e38d66c62e2c12f0225249fd9d721c54b83f48d9352c97c6cacdcb6f31';
+    });
+    
+    if (orderFulfilledEvents.length > 0) {
+      console.log('Found OrderFulfilled event - parsing price data');
+      const orderFulfilledEvent = orderFulfilledEvents[0];
+      
+      // Use transaction value if significant
+      if (BigInt(transaction.value) > BigInt(1e16)) { // More than 0.01 ETH
+        priceEth = Number(BigInt(transaction.value)) / 1e18;
+        console.log(`Using transaction value as price: ${priceEth} ETH`);
+      } else {
+        // Try to extract payment from event data
+        if (orderFulfilledEvent.data.includes('0000000000000000000000000000000000000000')) {
+          const ethPositionHint = orderFulfilledEvent.data.indexOf('0000000000000000000000000000000000000000');
+          if (ethPositionHint > 0) {
+            const potentialAmountHex = '0x' + orderFulfilledEvent.data.substring(ethPositionHint + 64, ethPositionHint + 64 + 64);
+            try {
+              const amountWei = BigInt(potentialAmountHex);
+              if (amountWei > 0) {
+                priceEth = Number(amountWei) / 1e18;
+                console.log(`Extracted payment amount from OrderFulfilled data: ${priceEth} ETH`);
+              }
+            } catch (error) {
+              console.error('Error parsing potential ETH amount:', error);
+            }
+          }
+        }
+      }
+    }
+    
+    // Method 2: Look for direct ETH/WETH transfers
+    if (priceEth === 0) {
+      // Check for WETH transfers
+      const wethAddress = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
+      
+      const wethTransfers = receipt.logs.filter(log => {
+        return log.address.toLowerCase() === wethAddress.toLowerCase() && 
+               log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+      });
+      
+      if (wethTransfers.length > 0) {
+        console.log('Found WETH transfer event');
+        const wethTransfer = wethTransfers[0];
+        const amountWei = BigInt(wethTransfer.data);
+        priceEth = Number(amountWei) / 1e18;
+        console.log(`Extracted WETH payment: ${priceEth} ETH`);
+      } else if (BigInt(transaction.value) > BigInt(1e16)) {
+        // Use direct ETH value as fallback if significant
+        priceEth = Number(BigInt(transaction.value)) / 1e18;
+        console.log(`Using direct transaction value as price: ${priceEth} ETH`);
+      }
+    }
+    
+    return priceEth;
+  }
+
+  async testTransactionOutput(txHash, contractAddress) {
+    try {
+      console.log(`Testing output for transaction: ${txHash}`);
+      
+      // Get transaction details
+      const transaction = await this.api.alchemy.core.getTransaction(txHash);
+      if (!transaction || !transaction.to) {
+        console.log('Transaction not found or invalid');
+        return { success: false, error: 'Transaction not found or invalid' };
+      }
+      
+      // Get transaction receipt with logs
+      const receipt = await this.api.alchemy.core.getTransactionReceipt(txHash);
+      if (!receipt) {
+        console.log('Receipt not found');
+        return { success: false, error: 'Receipt not found' };
+      }
+      
+      // Look for ERC-721 Transfer event in the logs
+      const transferEvents = receipt.logs.filter(log => {
+        const isFromMonitoredContract = log.address.toLowerCase() === contractAddress.toLowerCase();
+        const isTransferEvent = log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+        return isFromMonitoredContract && isTransferEvent;
+      });
+      
+      if (transferEvents.length === 0) {
+        console.log('No Transfer events found in transaction');
+        return { success: false, error: 'No Transfer events found in transaction' };
+      }
+      
+      // Get the last Transfer event
+      const transferEvent = transferEvents[transferEvents.length - 1];
+      
+      // Parse the event data
+      const fromAddress = '0x' + transferEvent.topics[1].slice(26);
+      const toAddress = '0x' + transferEvent.topics[2].slice(26);
+      
+      // Parse tokenId
+      let tokenId;
+      if (transferEvent.topics.length > 3) {
+        tokenId = parseInt(transferEvent.topics[3], 16);
+      } else {
+        tokenId = parseInt(transferEvent.data, 16);
+      }
+      
+      console.log(`Extracted from event - From: ${fromAddress}, To: ${toAddress}, TokenId: ${tokenId}`);
+      
+      // Extract price information
+      const priceEth = await this.extractSalePrice(transaction, receipt);
+      console.log(`Final sale price: ${priceEth} ETH`);
+      
+      // Skip if below minimum price or zero
+      if (priceEth < this.config.MIN_PRICE_ETH || priceEth === 0) {
+        console.log(`Price ${priceEth} ETH is below minimum threshold or zero, skipping`);
+        return { success: false, error: `Price ${priceEth} ETH is below minimum threshold` };
+      }
+      
+      // Get project details
+      const details = await this.metadata.getProjectDetails(tokenId, contractAddress);
+      
+      // Get ETH/USD price
+      const ethPrice = await this.api.getEthPrice();
+      const usdPrice = ethPrice ? (priceEth * ethPrice) : null;
+      
+      // Get buyer info
+      let buyerDisplay = this.tweets.formatAddress(toAddress);
+      
+      // Try to get ENS name
+      const ensName = await this.api.getEnsName(toAddress);
+      if (ensName) {
+        buyerDisplay = ensName;
+      } else {
+        // Try to get OpenSea username
+        const osName = await this.api.getOpenseaUserName(toAddress);
+        if (osName) {
+          buyerDisplay = osName;
+        }
+      }
+      
+      // Format tweet
+      const tweetText = await this.tweets.formatSaleTweet(details, priceEth, usdPrice, buyerDisplay);
+      
+      console.log('\n--- TWEET PREVIEW ---\n');
+      console.log(tweetText);
+      console.log('\n---------------------\n');
+      
+      return { 
+        success: true, 
+        tweet: tweetText,
+        metadata: {
+          contract: contractAddress,
+          tokenId: tokenId,
+          projectName: details.projectName,
+          artistName: details.artistName,
+          tokenNumber: details.tokenNumber,
+          priceEth: priceEth,
+          priceUsd: usdPrice,
+          buyer: buyerDisplay,
+          from: fromAddress,
+          to: toAddress,
+          url: details.artBlocksUrl
+        }
+      };
+    } catch (error) {
+      console.error('Error in test transaction:', error);
+      return { success: false, error: error.message };
+    }
+  }
+}
+
+// =========================================================
+// HTTP SERVER & ROUTES
+// =========================================================
+
+class ServerManager {
+  constructor(apiServices, metadataManager, tweetManager, transactionProcessor, config) {
+    this.api = apiServices;
+    this.metadata = metadataManager;
+    this.tweets = tweetManager;
+    this.txProcessor = transactionProcessor;
+    this.config = config;
+  }
+
   setupServer() {
     const server = http.createServer((req, res) => {
       if (req.url === '/trigger-tweet') {
@@ -594,7 +1450,6 @@ class ServerManager {
       } else if (req.url === '/trigger-opensea-events') {
         this.handleTriggerOpenSeaEvents(req, res);
       } else if (req.url.startsWith('/api-test')) {
-        // Add this new route for the API test endpoint
         this.handleApiTest(req, res);
       } else if (req.url === '/help') {
         this.handleHelp(req, res);
@@ -607,12 +1462,459 @@ class ServerManager {
     const port = process.env.PORT || 3000;
     server.listen(port, () => {
       console.log(`Server running on port ${port}`);
+      console.log(`Try the API test endpoint: /api-test?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&api=test`);
     });
 
     return server;
   }
+  
+  handleApiTest(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tokenId = url.searchParams.get('tokenId');
+    const contractAddress = url.searchParams.get('contract') || this.config.CONTRACT_ADDRESSES[0];
+    const api = url.searchParams.get('api') || 'all'; // opensea, artblocks, alchemy, or all
+    
+    console.log(`API test request started - tokenId: ${tokenId}, contract: ${contractAddress}, api: ${api}`);
+    
+    if (!tokenId) {
+      console.log('API test error: Missing tokenId parameter');
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing tokenId. Use ?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&api=opensea in the URL');
+      return;
+    }
+    
+    // Create a simple test endpoint as a fallback to test basic functionality
+    if (api === 'test') {
+      console.log('Responding with test endpoint success');
+      res.writeHead(200, {'Content-Type': 'application/json'});
+      res.end(JSON.stringify({ 
+        success: true, 
+        message: 'API test endpoint is working correctly', 
+        params: { tokenId, contractAddress, api } 
+      }));
+      return;
+    }
+    
+    let results = {};
+    
+    // Process APIs sequentially to isolate issues
+    const processApis = async () => {
+      try {
+        // Process OpenSea API
+        if (api === 'opensea' || api === 'all') {
+          console.log('Starting OpenSea API call');
+          try {
+            results.opensea = await this.api.getOpenSeaAssetMetadata(contractAddress, tokenId);
+            console.log('OpenSea API call completed successfully');
+          } catch (error) {
+            console.error('OpenSea API call failed:', error.message);
+            results.opensea = { success: false, error: error.message };
+          }
+        }
+        
+        // Process Art Blocks API
+        if (api === 'artblocks' || api === 'all') {
+          console.log('Starting Art Blocks API call');
+          try {
+            results.artblocks = await this.api.getArtBlocksTokenInfo(tokenId, contractAddress);
+            console.log('Art Blocks API call completed successfully');
+          } catch (error) {
+            console.error('Art Blocks API call failed:', error.message);
+            results.artblocks = { success: false, error: error.message };
+          }
+        }
+        
+        // Process Alchemy API
+        if (api === 'alchemy' || api === 'all') {
+          console.log('Starting Alchemy API call');
+          try {
+            results.alchemy = await this.api.getAlchemyMetadata(contractAddress, tokenId);
+            console.log('Alchemy API call completed successfully');
+          } catch (error) {
+            console.error('Alchemy API call failed:', error.message);
+            results.alchemy = { success: false, error: error.message };
+          }
+        }
+        
+        // Prepare summary
+        results.summary = {
+          tokenId: tokenId,
+          contract: contractAddress,
+          apisChecked: api,
+          projectNames: {
+            opensea: results.opensea?.projectName || 'Not available',
+            artblocks: results.artblocks?.projectName || 'Not available',
+            alchemy: results.alchemy?.projectName || 'Not available'
+          },
+          artistNames: {
+            opensea: results.opensea?.artistName || 'Not available',
+            artblocks: results.artblocks?.artistName || 'Not available',
+            alchemy: results.alchemy?.artistName || 'Not available'
+          }
+        };
+        
+        console.log('All API calls completed, sending response');
+        return results;
+      } catch (error) {
+        console.error('Unexpected error in processApis:', error);
+        throw error;
+      }
+    };
+    
+    // Set a timeout for the entire operation
+    const timeout = setTimeout(() => {
+      console.error('API test timed out after 30 seconds');
+      res.writeHead(504, {'Content-Type': 'text/plain'});
+      res.end('Error: API test timed out after 30 seconds');
+    }, 30000);
+    
+    // Run APIs processing
+    processApis()
+      .then(results => {
+        clearTimeout(timeout);
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify(results, null, 2));
+      })
+      .catch(err => {
+        clearTimeout(timeout);
+        console.error('Error in API test handling:', err);
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error during API test: ' + err.message);
+      });
+  }
 
-  // UPDATE this method in your ServerManager class
+  handleTriggerTweet(req, res) {
+    console.log('Manual tweet trigger received');
+    this.tweets.sendTestTweet()
+      .then(() => {
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end('Tweet triggered - check logs for results');
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
+  }
+
+  handleHealth(req, res) {
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Bot is healthy. Last checked: ' + new Date().toISOString());
+  }
+
+  handleQueueStatus(req, res) {
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end(`Tweet queue status: ${this.tweets.tweetQueue.length} tweets waiting. Last tweet sent: ${new Date(this.tweets.lastTweetTime).toISOString()}. Failures: ${this.tweets.tweetFailures}. Tweets enabled: ${!this.config.DISABLE_TWEETS}`);
+  }
+
+  handleResetRateLimit(req, res) {
+    this.tweets.tweetFailures = 0;
+    this.tweets.lastRateLimitTime = 0;
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Rate limit state has been reset.');
+  }
+
+  handleEnableTweets(req, res) {
+    this.config.DISABLE_TWEETS = false;
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Tweets have been enabled. The bot will now post to Twitter.');
+  }
+
+  handleDisableTweets(req, res) {
+    this.config.DISABLE_TWEETS = true;
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Tweets have been disabled. The bot will only preview tweets in logs.');
+  }
+
+  handleTestEthPrice(req, res) {
+    this.api.getEthPrice()
+      .then(price => {
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end(`Current ETH price: $${price}`);
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error getting ETH price: ' + err.message);
+      });
+  }
+
+  handleTestTransaction(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const txHash = url.searchParams.get('hash');
+    
+    if (!txHash) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing transaction hash. Use ?hash=0x... in the URL');
+      return;
+    }
+    
+    console.log(`Manual transaction test received for hash: ${txHash}`);
+    
+    // First get the transaction to determine which contract is involved
+    this.api.alchemy.core.getTransactionReceipt(txHash)
+      .then(receipt => {
+        if (!receipt) {
+          throw new Error('Transaction receipt not found');
+        }
+        
+        // Find any Transfer events from our monitored contracts
+        let foundContract = null;
+        
+        // Normalize our contract addresses for comparison
+        const monitoredAddresses = this.config.CONTRACT_ADDRESSES.map(addr => addr.toLowerCase());
+        
+        // Check logs for events from our contracts
+        for (const log of receipt.logs) {
+          const logAddress = log.address.toLowerCase();
+          if (monitoredAddresses.includes(logAddress)) {
+            foundContract = logAddress;
+            console.log(`Detected relevant contract: ${foundContract}`);
+            break;
+          }
+        }
+        
+        if (!foundContract) {
+          throw new Error('No events from monitored Art Blocks contracts found in this transaction');
+        }
+        
+        // Create a minimal tx object with the hash
+        const testTx = {
+          hash: txHash
+        };
+        
+        // Now process with the detected contract
+        return this.txProcessor.processTransaction(testTx, foundContract)
+          .then(() => foundContract);
+      })
+      .then((contractAddress) => {
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end(`Processing transaction ${txHash} for detected contract ${contractAddress}. Check logs for results.`);
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
+  }
+
+  handleTestOutput(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const txHash = url.searchParams.get('hash');
+    const forceRefresh = url.searchParams.get('refresh') === 'true';
+    
+    if (!txHash) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing transaction hash. Use ?hash=0x... in the URL');
+      return;
+    }
+    
+    console.log(`Testing output for hash: ${txHash}, force refresh: ${forceRefresh}`);
+    
+    // First get the transaction to determine which contract is involved
+    this.api.alchemy.core.getTransactionReceipt(txHash)
+      .then(receipt => {
+        if (!receipt) {
+          throw new Error('Transaction receipt not found');
+        }
+        
+        // Find any Transfer events from our monitored contracts
+        let foundContract = null;
+        
+        // Normalize our contract addresses for comparison
+        const monitoredAddresses = this.config.CONTRACT_ADDRESSES.map(addr => addr.toLowerCase());
+        
+        // Check logs for events from our contracts
+        for (const log of receipt.logs) {
+          const logAddress = log.address.toLowerCase();
+          if (monitoredAddresses.includes(logAddress)) {
+            foundContract = logAddress;
+            console.log(`Detected relevant contract: ${foundContract}`);
+            break;
+          }
+        }
+        
+        if (!foundContract) {
+          throw new Error('No events from monitored Art Blocks contracts found in this transaction');
+        }
+        
+        // Clear cache if forced refresh is requested
+        if (forceRefresh) {
+          console.log("Force refresh requested - clearing cache before processing");
+          this.api.clearCaches();
+        }
+        
+        // Now process with the detected contract
+        return this.txProcessor.testTransactionOutput(txHash, foundContract);
+      })
+      .then(result => {
+        // Just return a plain text response
+        if (result.success) {
+          // Get the tweet content as plain text
+          const tweetText = result.tweet || "No tweet content available";
+          
+          // Add metadata as simple text
+          let response = "TWEET PREVIEW:\n\n" + tweetText + "\n\n";
+          response += "METADATA:\n";
+          
+          if (result.metadata) {
+            response += "Contract: " + result.metadata.contract + "\n";
+            response += "Token ID: " + result.metadata.tokenId + "\n";
+            response += "Project: " + result.metadata.projectName + "\n";
+            response += "Artist: " + result.metadata.artistName + "\n";
+            response += "Token #: " + result.metadata.tokenNumber + "\n";
+            
+            // Format price with USD if available
+            response += "Price: " + result.metadata.priceEth + " ETH";
+            if (result.metadata.priceUsd) {
+              response += " ($" + this.tweets.formatPrice(result.metadata.priceUsd) + ")";
+            }
+            response += "\n";
+            
+            response += "Buyer: " + result.metadata.buyer + "\n";
+            response += "From: " + result.metadata.from + "\n";
+            response += "To: " + result.metadata.to + "\n";
+            response += "URL: " + result.metadata.url + "\n";
+          }
+          
+          response += "\nTo refresh metadata: " + req.url + "&refresh=true";
+          
+          res.writeHead(200, {'Content-Type': 'text/plain'});
+          res.end(response);
+        } else {
+          res.writeHead(400, {'Content-Type': 'text/plain'});
+          res.end("Failed to process transaction: " + (result.error || "Unknown error"));
+        }
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
+  }
+
+  handleTestMetadata(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tokenId = url.searchParams.get('tokenId');
+    const contractAddress = url.searchParams.get('contract') || this.config.CONTRACT_ADDRESSES[0];
+    const forceRefresh = url.searchParams.get('refresh') === 'true';
+    
+    if (!tokenId) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing tokenId. Use ?tokenId=1506 in the URL');
+      return;
+    }
+    
+    console.log(`Testing metadata retrieval for token: ${tokenId} on contract: ${contractAddress}, force refresh: ${forceRefresh}`);
+    
+    // Clear cache for this token if forced refresh is requested
+    if (forceRefresh) {
+      const cacheKey = `${contractAddress.toLowerCase()}-${tokenId}`;
+      if (this.api.tokenMetadataCache[cacheKey]) {
+        delete this.api.tokenMetadataCache[cacheKey];
+        console.log(`Cleared cache for ${cacheKey}`);
+      }
+    }
+    
+    this.metadata.getProjectDetails(tokenId, contractAddress)
+      .then(details => {
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify(details, null, 2));
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
+  }
+
+  handleDebugMetadata(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tokenId = url.searchParams.get('tokenId');
+    const contractAddress = url.searchParams.get('contract') || this.config.CONTRACT_ADDRESSES[0];
+    
+    if (!tokenId) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing tokenId. Use ?tokenId=1506 in the URL');
+      return;
+    }
+    
+    console.log(`Debugging metadata for token: ${tokenId} on contract: ${contractAddress}`);
+    
+    // Get OpenSea metadata
+    this.api.getOpenSeaAssetMetadata(contractAddress, tokenId)
+      .then(openSeaData => {
+        // Get Art Blocks API data
+        return this.api.getArtBlocksTokenInfo(tokenId, contractAddress)
+          .then(artBlocksData => {
+            // Get Alchemy metadata
+            return this.api.getAlchemyMetadata(contractAddress, tokenId)
+              .then(alchemyData => {
+                // Compile all results
+                const result = {
+                  openSeaApi: openSeaData,
+                  artBlocksApi: artBlocksData,
+                  alchemyApi: alchemyData,
+                  finalMetadata: null
+                };
+                
+                // Now get the final combined metadata
+                return this.metadata.getProjectDetails(tokenId, contractAddress)
+                  .then(finalData => {
+                    result.finalMetadata = finalData;
+                    
+                    res.writeHead(200, {'Content-Type': 'application/json'});
+                    res.end(JSON.stringify(result, null, 2));
+                  });
+              });
+          });
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
+  }
+  
+  handleTriggerOpenSeaEvents(req, res) {
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Manually triggering OpenSea events check. Check logs for results.');
+    
+    // This will be executed after the response is sent
+    if (global.openSeaProcessor) {
+      global.openSeaProcessor.processOpenSeaEvents()
+        .then(() => {
+          console.log('Manual OpenSea events check completed');
+        })
+        .catch(err => {
+          console.error('Error in manual OpenSea events check:', err);
+        });
+    } else {
+      console.error('OpenSea processor not initialized');
+    }
+  }
+
+  handleClearCache(req, res) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tokenId = url.searchParams.get('tokenId');
+    const contractAddress = url.searchParams.get('contract');
+    
+    if (tokenId && contractAddress) {
+      // Clear specific token cache
+      const cacheKey = `${contractAddress.toLowerCase()}-${tokenId}`;
+      if (this.api.tokenMetadataCache[cacheKey]) {
+        delete this.api.tokenMetadataCache[cacheKey];
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end(`Cache cleared for specific token: ${contractAddress}/${tokenId}`);
+        return;
+      } else {
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end(`No cache found for token: ${contractAddress}/${tokenId}`);
+        return;
+      }
+    }
+    
+    // Clear all caches
+    this.api.clearCaches();
+    
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('All caches have been cleared.');
+  }
+
   handleHelp(req, res) {
     const helpText = `
 Art Blocks Sales Bot - Available Endpoints:
@@ -629,6 +1931,7 @@ Art Blocks Sales Bot - Available Endpoints:
 /test-metadata?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a  - Test metadata retrieval for a specific token
 /debug-metadata?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a - Debug all API responses for a specific token
 /api-test?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&api=all - Test each API individually (opensea, artblocks, alchemy, or all)
+/api-test?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a&api=test - Quick API test (doesn't call external APIs)
 /trigger-opensea-events      - Manually trigger OpenSea events check
 /clear-cache        - Clear metadata and price caches
 /reset-rate-limit   - Reset rate limit tracking
@@ -645,9 +1948,131 @@ Example usage:
     res.end(helpText);
   }
 
-  // Your other existing methods...
+  handleRoot(req, res) {
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Art Blocks Sales Bot is running. Visit /help for available endpoints.');
+  }
 }
 
 // =========================================================
-// END OF UPDATES
+// MAIN APPLICATION CLASS
 // =========================================================
+
+class ArtBlocksSalesBot {
+  constructor() {
+    this.config = new Config();
+    this.apiServices = new ApiServices(this.config);
+    this.metadata = new MetadataManager(this.apiServices, this.config);
+    this.tweets = new TweetManager(this.apiServices, this.config);
+    this.txProcessor = new TransactionProcessor(this.apiServices, this.metadata, this.tweets, this.config);
+    this.openSeaProcessor = new OpenSeaEventProcessor(this.apiServices, this.metadata, this.tweets, this.config);
+    this.server = new ServerManager(this.apiServices, this.metadata, this.tweets, this.txProcessor, this.config);
+    
+    // Make the OpenSea processor globally accessible for manual triggers
+    global.openSeaProcessor = this.openSeaProcessor;
+  }
+
+  async initialize() {
+    console.log('Starting with environment check...');
+    this.checkEnvironment();
+    
+    // Initialize API services
+    this.apiServices.initTwitter();
+    this.apiServices.initAlchemy();
+    
+    // Start the HTTP server
+    this.server.setupServer();
+    
+    // Start OpenSea event polling (primary method)
+    this.openSeaProcessor.startEventPolling();
+    
+    // Start blockchain monitoring (backup method)
+    await this.monitorSales();
+    
+    // Setup health checks
+    this.setupHealthChecks();
+    
+    console.log('Art Blocks Sales Bot is now running with hybrid monitoring approach');
+  }
+
+  checkEnvironment() {
+    const requiredVars = [
+      'TWITTER_CONSUMER_KEY', 
+      'TWITTER_CONSUMER_SECRET',
+      'TWITTER_ACCESS_TOKEN',
+      'TWITTER_ACCESS_TOKEN_SECRET',
+      'ALCHEMY_API_KEY',
+      'OPENSEA_API_KEY'
+    ];
+
+    const missingVars = requiredVars.filter(varName => !process.env[varName]);
+    if (missingVars.length > 0) {
+      console.error(`Missing required environment variables: ${missingVars.join(', ')}`);
+      console.log('Continuing without some variables for debugging purposes');
+    }
+  }
+
+  async monitorSales() {
+    console.log('Starting blockchain monitoring of Art Blocks sales as backup...');
+    
+    try {
+      if (this.apiServices.alchemy) {
+        console.log('Setting up Alchemy websocket listener...');
+        
+        this.config.CONTRACT_ADDRESSES.forEach(contractAddress => {
+          console.log(`Setting up listener for contract: ${contractAddress}`);
+          
+          this.apiServices.alchemy.ws.on(
+            {
+              method: 'alchemy_pendingTransactions',
+              fromAddress: this.config.OPENSEA_ADDRESS,
+              toAddress: contractAddress,
+            },
+            (tx) => this.txProcessor.processTransaction(tx, contractAddress)
+          );
+        });
+        
+        console.log('Alchemy listeners set up successfully');
+      } else {
+        console.error('Alchemy client not initialized, blockchain monitoring disabled');
+      }
+      
+      console.log('Blockchain monitoring setup complete...');
+      
+      // Send initial test tweet after a delay
+      if (!this.config.DISABLE_TWEETS) {
+        console.log(`Waiting ${this.config.INITIAL_STARTUP_DELAY/60000} minutes before sending first tweet...`);
+        setTimeout(async () => {
+          await this.tweets.sendTestTweet();
+        }, this.config.INITIAL_STARTUP_DELAY);
+      } else {
+        console.log('Tweets are disabled. The bot will only preview tweets in the console.');
+        console.log('To enable tweets, use the /enable-tweets endpoint.');
+      }
+    } catch (error) {
+      console.error('Error in monitorSales function:', error);
+    }
+  }
+
+  setupHealthChecks() {
+    // Send a health check tweet once a day to verify the bot is still running
+    setInterval(async () => {
+      try {
+        console.log('Running health check...');
+        console.log(`Health check passed at ${new Date().toISOString()}`);
+      } catch (error) {
+        console.error('Health check failed:', error);
+      }
+    }, this.config.HEALTH_CHECK_INTERVAL);
+  }
+}
+
+// Start the bot
+(async () => {
+  try {
+    const bot = new ArtBlocksSalesBot();
+    await bot.initialize();
+  } catch (error) {
+    console.error('Error starting bot:', error);
+  }
+})();
