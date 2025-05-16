@@ -1107,35 +1107,6 @@ class TweetManager {
   
   return tweetText;
 }
-    
-    // For Art Blocks tokens, the tokenNumber field might have the full ID
-    // We want just the edition number part (the last 6 digits)
-    const tokenNumber = details.tokenNumber % 1000000 || details.tokenNumber;
-    
-    // This is the line that needs to be properly included in the output
-    let tweetText = `${projectName} #${tokenNumber} by ${artistName}\n`;
-    
-    // Add price info
-    tweetText += `sold for ${this.formatPrice(priceEth)} ETH`;
-    
-    if (usdPrice) {
-      tweetText += ` (${this.formatPrice(usdPrice)})`;
-    }
-    
-    // Add buyer info and URL
-    tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
-    
-    // Debug output to verify the tweet format
-    console.log('\n--- FORMATTED TWEET ---\n');
-    console.log(`${projectName} #${tokenNumber} by ${artistName}`);
-    console.log(`sold for ${this.formatPrice(priceEth)} ETH${usdPrice ? ` (${this.formatPrice(usdPrice)})` : ''}`);
-    console.log(`to ${buyerDisplay}`);
-    console.log();
-    console.log(details.artBlocksUrl);
-    console.log('\n---------------------\n');
-    
-    return tweetText;
-  }
   async generateAIContext(details, projectName, artistName) {
   try {
     // Check if OpenAI is configured
