@@ -395,19 +395,21 @@ class ApiServices {
       // Process each collection slug
       for (const collectionSlug of this.config.OPENSEA_COLLECTION_SLUGS) {
         try {
+          // Using updated OpenSea API v2 endpoint format and parameters
           const response = await axios.get(
-            `https://api.opensea.io/api/v2/events/collection/${collectionSlug}`, {
+            `https://api.opensea.io/api/v2/events`, {
               headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY },
               params: {
-                event_type: 'successful',
-                occurred_after: new Date(this.lastEventTimestamp).toISOString(),
+                collection_slug: collectionSlug,
+                event_type: 'sale',
+                after: Math.floor(this.lastEventTimestamp / 1000), // Unix timestamp in seconds
                 limit: 50
               }
             }
           );
           
-          if (response.data && response.data.asset_events) {
-            const events = response.data.asset_events;
+          if (response.data && response.data.events) {
+            const events = response.data.events;
             console.log(`Found ${events.length} events for collection ${collectionSlug}`);
             
             // Filter out events we've already processed
@@ -417,7 +419,7 @@ class ApiServices {
                 this.processedEventIds.add(event.id);
                 
                 // Update last event timestamp if this is more recent
-                const eventTimestamp = new Date(event.created_date).getTime();
+                const eventTimestamp = new Date(event.created_date || event.timestamp).getTime();
                 if (eventTimestamp > this.lastEventTimestamp) {
                   this.lastEventTimestamp = eventTimestamp;
                 }
@@ -430,6 +432,11 @@ class ApiServices {
           
         } catch (error) {
           console.error(`Error fetching events for ${collectionSlug}:`, error.message);
+          // Log more detailed error info
+          if (error.response) {
+            console.error(`Response status: ${error.response.status}`);
+            console.error(`Response data:`, JSON.stringify(error.response.data, null, 2));
+          }
           // Continue with next collection
         }
       }
@@ -817,15 +824,15 @@ class OpenSeaEventProcessor {
   async processSaleEvent(event) {
     try {
       // Check if this is a valid sale event
-      if (!event.payment || !event.asset) {
-        console.log('Invalid sale event - missing payment or asset data');
+      if (!event.payment || !event.nft) {
+        console.log('Invalid sale event - missing payment or NFT data');
         return false;
       }
       
       // Extract sale information
-      const contractAddress = event.asset.asset_contract.address;
-      const tokenId = event.asset.token_id;
-      const buyerAddress = event.winner_account?.address;
+      const contractAddress = event.nft.contract;
+      const tokenId = event.nft.identifier;
+      const buyerAddress = event.winner?.address;
       
       // Skip if contract address doesn't match our monitored contracts
       if (!this.config.CONTRACT_ADDRESSES.some(addr => 
