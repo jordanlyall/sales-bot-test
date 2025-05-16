@@ -47,7 +47,7 @@ class Config {
     this.RETRY_DELAY = 60000; // 1 minute
     this.ETH_PRICE_CACHE_DURATION = 900000; // 15 minutes
     this.MIN_TIME_BETWEEN_TWEETS = 15 * 60 * 1000; // 15 minutes
-    this.DISABLE_TWEETS = true; // Set to false to enable actual tweets
+    this.DISABLE_TWEETS = false; // Set to false to enable actual tweets
     this.INITIAL_STARTUP_DELAY = 300000; // 5 minutes
     this.NFT_METADATA_CACHE_DURATION = 24 * 60 * 60 * 1000; // 1 day
     this.OPENSEA_EVENTS_POLL_INTERVAL = 60000; // 1 minute
@@ -772,8 +772,8 @@ class MetadataManager {
       } else {
         // Try to extract from project name
         if (projectName) {
-          const nameParts = projectName.match(/(.*) by (.*)/i);
-          if (nameParts && nameParts.length > 2) {
+          const nameParts = projectName.match(/(.+) by (.+?)(\s+#\d+)?$/i);
+          if (nameParts && nameParts[2]) {
             artistName = nameParts[2].trim();
             console.log(`Extracted artist from project name: ${artistName}`);
           }
@@ -793,6 +793,29 @@ class MetadataManager {
           artistName = 'Unknown Artist';
           console.log('Using fallback artist name: Unknown Artist');
         }
+      }
+    }
+    
+    // Check if artist name is an ETH address and we have a better alternative
+    if (artistName && artistName.startsWith('0x') && artistName.length === 42) {
+      console.log(`Artist name appears to be an ETH address: ${artistName}`);
+      
+      // Try to extract from project name
+      if (projectName) {
+        const byMatch = projectName.match(/(.+) by (.+?)(\s+#\d+)?$/i);
+        if (byMatch && byMatch[2]) {
+          const extractedArtist = byMatch[2].trim();
+          if (extractedArtist.length > 0 && !extractedArtist.startsWith('0x')) {
+            console.log(`Replacing ETH address with artist name from project: ${extractedArtist}`);
+            artistName = extractedArtist;
+          }
+        }
+      }
+      
+      // Special case lookups for known contracts
+      if (artistName.toLowerCase() === '0xf3860788d1597cecf938424baabe976fac87dc26'.toLowerCase()) {
+        artistName = 'Snowfro';
+        console.log(`Mapped known creator address to: ${artistName}`);
       }
     }
     
