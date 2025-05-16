@@ -1040,31 +1040,73 @@ class TweetManager {
   }
 
   async formatSaleTweet(details, priceEth, usdPrice, buyerDisplay) {
-    // Clean up the project name - remove any "by Artist" suffix if artist name is already provided
-    let projectName = details.projectName.replace(/ #\d+$/, '');
-    
-    // Remove redundant artist mentions in project name
-    if (details.artistName && projectName.toLowerCase().includes(' by ' + details.artistName.toLowerCase())) {
-      projectName = projectName.replace(new RegExp(` by ${details.artistName}`, 'i'), '');
-      console.log(`Removed redundant artist name from project name: ${projectName}`);
-    } else if (details.artistName && projectName.toLowerCase().includes(' by ')) {
-      // Generic "by" handling - might need to clean up
-      projectName = projectName.replace(/ by .+$/i, '');
-      console.log(`Removed generic "by..." from project name: ${projectName}`);
-    }
-    
-    // Make sure we're not using an ETH address as artist name
-    let artistName = details.artistName;
-    if (artistName && artistName.startsWith('0x') && artistName.length === 42) {
-      // This looks like an ETH address, try to get a better artist name
-      if (projectName.toLowerCase().includes(' by ')) {
-        const byMatch = projectName.match(/ by ([^#]+)$/i);
-        if (byMatch && byMatch[1]) {
-          artistName = byMatch[1].trim();
-          console.log(`Extracted better artist name from project name: ${artistName}`);
-        }
+  // Clean up the project name - remove any "by Artist" suffix if artist name is already provided
+  let projectName = details.projectName.replace(/ #\d+$/, '');
+  
+  // Remove redundant artist mentions in project name
+  if (details.artistName && projectName.toLowerCase().includes(' by ' + details.artistName.toLowerCase())) {
+    projectName = projectName.replace(new RegExp(` by ${details.artistName}`, 'i'), '');
+    console.log(`Removed redundant artist name from project name: ${projectName}`);
+  } else if (details.artistName && projectName.toLowerCase().includes(' by ')) {
+    // Generic "by" handling - might need to clean up
+    projectName = projectName.replace(/ by .+$/i, '');
+    console.log(`Removed generic "by..." from project name: ${projectName}`);
+  }
+  
+  // Make sure we're not using an ETH address as artist name
+  let artistName = details.artistName;
+  if (artistName && artistName.startsWith('0x') && artistName.length === 42) {
+    // This looks like an ETH address, try to get a better artist name
+    if (projectName.toLowerCase().includes(' by ')) {
+      const byMatch = projectName.match(/ by ([^#]+)$/i);
+      if (byMatch && byMatch[1]) {
+        artistName = byMatch[1].trim();
+        console.log(`Extracted better artist name from project name: ${artistName}`);
       }
     }
+  }
+  
+  // For Art Blocks tokens, the tokenNumber field might have the full ID
+  // We want just the edition number part (the last 6 digits)
+  const tokenNumber = details.tokenNumber % 1000000 || details.tokenNumber;
+  
+  // This is the line that needs to be properly included in the output
+  let tweetText = `${projectName} #${tokenNumber} by ${artistName}\n`;
+  
+  // Add price info
+  tweetText += `sold for ${this.formatPrice(priceEth)} ETH`;
+  
+  if (usdPrice) {
+    tweetText += ` (${this.formatPrice(usdPrice)})`;
+  }
+  
+  // Add buyer info
+  tweetText += `\nto ${buyerDisplay}`;
+  
+  // Add AI context if available
+  if (details.aiContext) {
+    tweetText += `\n\n🤖 "${details.aiContext}"`;
+  }
+  
+  // Add URL (with an extra line break if we added AI context)
+  tweetText += `\n\n${details.artBlocksUrl}`;
+  
+  // Debug output to verify the tweet format
+  console.log('\n--- FORMATTED TWEET ---\n');
+  console.log(`${projectName} #${tokenNumber} by ${artistName}`);
+  console.log(`sold for ${this.formatPrice(priceEth)} ETH${usdPrice ? ` (${this.formatPrice(usdPrice)})` : ''}`);
+  console.log(`to ${buyerDisplay}`);
+  
+  if (details.aiContext) {
+    console.log(`\n🤖 "${details.aiContext}"`);
+  }
+  
+  console.log();
+  console.log(details.artBlocksUrl);
+  console.log('\n---------------------\n');
+  
+  return tweetText;
+}
     
     // For Art Blocks tokens, the tokenNumber field might have the full ID
     // We want just the edition number part (the last 6 digits)
@@ -1102,67 +1144,107 @@ class TweetManager {
       return null;
     }
 
-    // Extract description and traits if available
-    let description = details.description || '';
-    let traits = [];
+    // Extract description
+    let description = '';
     
-    // Try to extract traits from the fullData if available
+    // Deep search for description
+    if (details.description) {
+      description = details.description;
+    } else if (details.fullData?.description) {
+      description = details.fullData.description;
+    }
+    
+    // Comprehensive trait extraction - check ALL possible locations
+    let traits = [];
+    let traitMap = {}; // Create a key-value map of traits for easier reference
+    
+    // If we have fullData, search for traits in all possible locations
     if (details.fullData) {
-      // Look for traits in various possible locations based on the API source
-      if (details.fullData.traits) {
-        traits = details.fullData.traits;
-      } else if (details.fullData.attributes) {
-        traits = details.fullData.attributes;
-      } else if (details.fullData.metadata?.attributes) {
-        traits = details.fullData.metadata.attributes;
-      } else if (details.fullData.rawMetadata?.attributes) {
-        traits = details.fullData.rawMetadata.attributes;
+      console.log("Searching for traits in fullData...");
+      
+      // Chain of possible locations for traits
+      const possibleTraitLocations = [
+        details.fullData.traits,
+        details.fullData.attributes,
+        details.fullData.features,
+        details.fullData.nft?.traits,
+        details.fullData.metadata?.attributes,
+        details.fullData.rawMetadata?.attributes,
+        details.fullData.project?.traits,
+        details.fullData.project?.features
+      ];
+      
+      // Use the first non-empty array of traits we find
+      for (const location of possibleTraitLocations) {
+        if (Array.isArray(location) && location.length > 0) {
+          traits = location;
+          console.log(`Found ${traits.length} traits`);
+          break;
+        }
+      }
+      
+      // If we still don't have traits, try a deeper recursive search
+      if (traits.length === 0) {
+        console.log("Performing deep search for traits...");
+        traits = this._findTraitsRecursively(details.fullData);
+        console.log(`Deep search found ${traits.length} traits`);
       }
     }
     
-    // Format traits for the prompt
+    // Process traits into a formatted text and trait map
     let traitsText = '';
     if (Array.isArray(traits) && traits.length > 0) {
       traitsText = traits.map(trait => {
-        if (trait.trait_type && trait.value) {
-          return `${trait.trait_type}: ${trait.value}`;
-        } else if (typeof trait === 'object') {
-          // Handle non-standard trait formats
-          const key = Object.keys(trait).find(k => k !== 'value' && k !== 'trait_type');
-          return key ? `${key}: ${trait[key]}` : '';
-        }
-        return '';
+        let traitType = trait.trait_type || trait.type || Object.keys(trait)[0];
+        let value = trait.value || trait[traitType];
+        
+        // Skip if this isn't a valid trait
+        if (!traitType || !value) return '';
+        
+        // Normalize trait type to handle case variations
+        const normalizedType = traitType.toLowerCase().trim();
+        traitMap[normalizedType] = value;
+        
+        return `${traitType}: ${value}`;
       }).filter(Boolean).join(', ');
     }
     
-    console.log(`Description length: ${description.length}, Traits: ${traitsText || 'None found'}`);
+    console.log(`Description length: ${description.length}`);
+    console.log(`Traits found: ${JSON.stringify(traitMap)}`);
 
     const { OpenAI } = require('openai');
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
     
+    // Create project-specific context
+    let projectContext = '';
+    if (projectName.toLowerCase().includes('squiggle')) {
+      projectContext = "Chromie Squiggles are the iconic Art Blocks genesis project by Snowfro (Erick Calderon).";
+    }
+    
     // Create a detailed prompt with all available information
     const prompt = `
     Project Name: "${projectName}" by artist ${artistName}
+    ${projectContext}
     ${description ? `Project Description: "${description.substring(0, 500)}"` : ''}
     ${traitsText ? `Token Traits: ${traitsText}` : ''}
     
-    Based on the information above, provide a compelling, specific, and unique fact about this NFT.
-    Focus on ONE distinctive aspect of the artwork, its aesthetics, creation process, or meaning.
-    Mention specific traits or visual elements if known. Keep it under 25 words.
-    Make it interesting and specific enough that it would entice someone to look at the artwork.
+    Create a specific, compelling fact about this NFT artwork.
+    IMPORTANT: If traits are available, specifically mention the most interesting trait(s) and how they affect the artwork's appearance.
+    For example, if it's a Chromie Squiggle with a "Bold" trait, mention how the bold lines create a distinctive visual impact.
+    Focus on what makes THIS specific token unique. Keep it under 25 words and make it engaging.
     `;
     
     // Call OpenAI API with improved parameters
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // Using a more capable model if available, or you can use "gpt-3.5-turbo"
+      model: "gpt-4o-mini", // Or gpt-3.5-turbo if this isn't available
       messages: [
-        {role: "system", content: "You are an expert art critic who specializes in generative and algorithmic art. You provide insightful, specific observations about NFT artworks, focusing on their unique properties and artistic significance."},
+        {role: "system", content: "You are an expert on generative NFT art, especially Art Blocks projects. You provide specific, accurate descriptions that highlight the unique traits and visual characteristics of each token."},
         {role: "user", content: prompt}
       ],
       max_tokens: 60,
-      temperature: 0.8, // Slightly higher temperature for more creative outputs
+      temperature: 0.7,
     });
     
     // Clean up the response
@@ -1176,6 +1258,49 @@ class TweetManager {
   } catch (error) {
     console.error('OpenAI API error:', error.message);
     return null;
+  }
+  
+  // Helper method to recursively search for traits in complex objects
+  _findTraitsRecursively(obj, depth = 0) {
+    // Prevent infinite recursion
+    if (depth > 5) return [];
+    
+    // If we found an array that looks like traits, return it
+    if (Array.isArray(obj) && obj.length > 0 && 
+        (obj[0].trait_type || obj[0].type || obj[0].key || obj[0].attribute_type)) {
+      return obj;
+    }
+    
+    // If this is an object, search its properties
+    if (obj && typeof obj === 'object') {
+      // Look for property names that suggest traits
+      const traitKeys = ['traits', 'attributes', 'features', 'metadata', 'properties'];
+      
+      for (const key of traitKeys) {
+        if (obj[key]) {
+          if (Array.isArray(obj[key]) && obj[key].length > 0) {
+            // Check if this looks like a traits array
+            if (obj[key][0] && typeof obj[key][0] === 'object') {
+              return obj[key];
+            }
+          } else if (typeof obj[key] === 'object') {
+            // Recurse into this property
+            const result = this._findTraitsRecursively(obj[key], depth + 1);
+            if (result.length > 0) return result;
+          }
+        }
+      }
+      
+      // If we haven't found traits yet, try all properties
+      for (const key in obj) {
+        if (obj[key] && typeof obj[key] === 'object') {
+          const result = this._findTraitsRecursively(obj[key], depth + 1);
+          if (result.length > 0) return result;
+        }
+      }
+    }
+    
+    return [];
   }
 }
 }
