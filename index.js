@@ -27,17 +27,24 @@ const CONFIG = {
   // Number of retries for API calls
   MAX_RETRIES: 3,
   // Time between retries (base milliseconds)
-  RETRY_DELAY: 3000,
+  RETRY_DELAY: 60000, // 1 minute (increased from 3 seconds)
   // Cache duration for ETH price in milliseconds
   ETH_PRICE_CACHE_DURATION: 900000, // 15 minutes
   // Minimum time between tweets (15 minutes)
-  MIN_TIME_BETWEEN_TWEETS: 15 * 60 * 1000
+  MIN_TIME_BETWEEN_TWEETS: 15 * 60 * 1000,
+  // Whether to actually send tweets or just preview them
+  DISABLE_TWEETS: true, // Set to false when ready to enable tweets
+  // Initial startup delay before first tweet attempt (5 minutes)
+  INITIAL_STARTUP_DELAY: 300000,
+  // Cache duration for NFT metadata (1 day)
+  NFT_METADATA_CACHE_DURATION: 24 * 60 * 60 * 1000
 };
 
 // Tweet queue variables
 let tweetQueue = [];
 let isTweetProcessing = false;
 let lastTweetTime = 0;
+const appStartTime = Date.now();
 
 // Twitter rate limit tracking
 let tweetFailures = 0;
@@ -48,6 +55,9 @@ let ethPriceCache = {
   price: null,
   timestamp: 0
 };
+
+// Cache for NFT metadata
+const tokenMetadataCache = {};
 
 // Contract name mapping for better descriptive names
 const contractNames = {
@@ -61,7 +71,7 @@ const contractNames = {
   '0xea698596b6009a622c3ed00dd5a8b5d1cae4fc36': 'Art Blocks Collaborations',
 };
 
-// Project info with artist names
+// Fallback project info (use only when API calls fail)
 const projectInfo = {
   // Flagship V1 (main contract)
   '0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270': {
@@ -83,25 +93,7 @@ const projectInfo = {
     0: { name: 'Moments of Computation', artist: 'William Mapan' },
     1: { name: 'Sudfeh', artist: 'Monica Rizzolli' },
   },
-  // Add other contracts as needed
 };
-
-// Function to check Twitter's status before tweeting
-async function checkTwitterStatus() {
-  // If we've hit rate limits recently, we should wait longer
-  const now = Date.now();
-  const timeSinceLastRateLimit = now - lastRateLimitTime;
-  
-  if (lastRateLimitTime > 0 && timeSinceLastRateLimit < 30 * 60 * 1000) {
-    // Less than 30 minutes since last rate limit
-    const remainingCooldown = 30 * 60 * 1000 - timeSinceLastRateLimit;
-    const minutes = Math.ceil(remainingCooldown / 60000);
-    console.log(`Twitter appears to be rate limited. Recommended to wait ${minutes} more minutes before tweeting.`);
-    return false;
-  }
-  
-  return true;
-}
 
 // Initialize HTTP server for health checks and manual triggers
 const server = http.createServer((req, res) => {
@@ -121,12 +113,20 @@ const server = http.createServer((req, res) => {
     res.end('Bot is healthy. Last checked: ' + new Date().toISOString());
   } else if (req.url === '/queue-status') {
     res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end(`Tweet queue status: ${tweetQueue.length} tweets waiting. Last tweet sent: ${new Date(lastTweetTime).toISOString()}. Failures: ${tweetFailures}.`);
+    res.end(`Tweet queue status: ${tweetQueue.length} tweets waiting. Last tweet sent: ${new Date(lastTweetTime).toISOString()}. Failures: ${tweetFailures}. Tweets enabled: ${!CONFIG.DISABLE_TWEETS}`);
   } else if (req.url === '/reset-rate-limit') {
     tweetFailures = 0;
     lastRateLimitTime = 0;
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('Rate limit state has been reset.');
+  } else if (req.url === '/enable-tweets') {
+    CONFIG.DISABLE_TWEETS = false;
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Tweets have been enabled. The bot will now post to Twitter.');
+  } else if (req.url === '/disable-tweets') {
+    CONFIG.DISABLE_TWEETS = true;
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Tweets have been disabled. The bot will only preview tweets in logs.');
   } else if (req.url === '/test-eth-price') {
     getEthPrice()
       .then(price => {
@@ -191,6 +191,37 @@ const server = http.createServer((req, res) => {
         res.writeHead(500, {'Content-Type': 'text/plain'});
         res.end('Error: ' + err.message);
       });
+  } else if (req.url.startsWith('/test-metadata')) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const tokenId = url.searchParams.get('tokenId');
+    const contractAddress = url.searchParams.get('contract') || CONFIG.CONTRACT_ADDRESSES[0];
+    
+    if (!tokenId) {
+      res.writeHead(400, {'Content-Type': 'text/plain'});
+      res.end('Error: Missing tokenId. Use ?tokenId=1506 in the URL');
+      return;
+    }
+    
+    console.log(`Testing metadata retrieval for token: ${tokenId} on contract: ${contractAddress}`);
+    
+    getProjectDetails(tokenId, contractAddress)
+      .then(details => {
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify(details, null, 2));
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
+  } else if (req.url === '/clear-cache') {
+    // Clear both caches
+    for (const key in tokenMetadataCache) {
+      delete tokenMetadataCache[key];
+    }
+    ethPriceCache = { price: null, timestamp: 0 };
+    
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('All caches have been cleared.');
   } else {
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('Art Blocks Sales Bot is running');
@@ -345,33 +376,127 @@ function formatAddress(address) {
   return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
 }
 
-// Enhanced getProjectDetails function
+// Function to get Art Blocks token information
+async function getArtBlocksTokenInfo(tokenId, contractAddress) {
+  try {
+    console.log(`Fetching from Art Blocks API for token ${tokenId}`);
+    const response = await axios.get(
+      `https://token.artblocks.io/${contractAddress}/${tokenId}`
+    );
+    
+    console.log('Art Blocks API response:', JSON.stringify(response.data, null, 2));
+    
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching from Art Blocks API:', error.message);
+    return null;
+  }
+}
+
+// Enhanced getProjectDetails function with dynamic API fetching
 async function getProjectDetails(tokenId, contractAddress) {
+  const normalizedAddress = contractAddress.toLowerCase();
+  const cacheKey = `${normalizedAddress}-${tokenId}`;
+  
+  // Check if we have cached metadata that's still valid
+  const now = Date.now();
+  if (tokenMetadataCache[cacheKey] && 
+      (now - tokenMetadataCache[cacheKey].timestamp < CONFIG.NFT_METADATA_CACHE_DURATION)) {
+    console.log(`Using cached metadata for ${cacheKey}`);
+    return tokenMetadataCache[cacheKey].data;
+  }
+  
+  // Calculate project ID and token number for fallback
   const projectId = Math.floor(tokenId / 1000000);
   const tokenNumber = tokenId % 1000000;
   
-  // Normalize contract address
-  const normalizedAddress = contractAddress.toLowerCase();
-  
-  // Get the project info for this contract
-  const contractProjects = projectInfo[normalizedAddress] || {};
-  const project = contractProjects[projectId] || null;
-  
-  // Get contract name for fallback
-  const contractType = contractNames[normalizedAddress] || 'Art Blocks';
-  
-  // Prepare project name and artist
   let projectName, artistName;
   
-  if (project) {
-    projectName = project.name;
-    artistName = project.artist;
+  // Try Art Blocks API first (most authoritative source)
+  const artBlocksData = await getArtBlocksTokenInfo(tokenId, normalizedAddress);
+  
+  if (artBlocksData && artBlocksData.project) {
+    console.log('Successfully fetched data from Art Blocks API');
+    
+    projectName = artBlocksData.project.name || `Art Blocks #${projectId}`;
+    artistName = artBlocksData.project.artist_name || artBlocksData.project.artist || 'Unknown Artist';
   } else {
-    projectName = `${contractType} #${projectId}`;
-    artistName = 'Unknown Artist';
+    // Try Alchemy NFT API
+    try {
+      console.log(`Fetching NFT metadata from Alchemy for token ${tokenId}`);
+      const nftMetadata = await alchemy.nft.getNftMetadata(
+        normalizedAddress,
+        tokenId
+      );
+      
+      console.log('Alchemy NFT metadata:', JSON.stringify(nftMetadata, null, 2));
+      
+      if (nftMetadata) {
+        // Extract information from Alchemy response
+        projectName = nftMetadata.title || nftMetadata.contract.name || `Art Blocks #${projectId}`;
+        
+        // Extract artist from metadata attributes
+        const artistAttribute = nftMetadata.rawMetadata?.attributes?.find(
+          attr => attr.trait_type?.toLowerCase() === 'artist'
+        );
+        
+        artistName = artistAttribute?.value || 'Unknown Artist';
+      } else {
+        throw new Error('No metadata returned from Alchemy');
+      }
+    } catch (alchemyError) {
+      console.error('Error fetching from Alchemy:', alchemyError.message);
+      
+      try {
+        // Fallback to OpenSea API
+        console.log(`Trying OpenSea API for token ${tokenId}`);
+        const osResponse = await axios.get(
+          `https://api.opensea.io/api/v2/chain/ethereum/contract/${normalizedAddress}/nfts/${tokenId}`,
+          { headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY } }
+        );
+        
+        console.log('OpenSea API response:', JSON.stringify(osResponse.data, null, 2));
+        
+        if (osResponse.data) {
+          const osData = osResponse.data;
+          projectName = osData.name || osData.collection?.name || `Art Blocks #${projectId}`;
+          
+          // Try to extract artist from traits
+          const artistTrait = osData.traits?.find(
+            trait => trait.trait_type?.toLowerCase() === 'artist'
+          );
+          
+          artistName = artistTrait?.value || 'Unknown Artist';
+        } else {
+          throw new Error('No data returned from OpenSea');
+        }
+      } catch (osError) {
+        console.error('Error fetching from OpenSea:', osError.message);
+        
+        // Final fallback to hardcoded values
+        const contractProjects = projectInfo[normalizedAddress] || {};
+        const project = contractProjects[projectId];
+        
+        if (project) {
+          projectName = project.name;
+          artistName = project.artist;
+        } else {
+          // If we have a Flagship V0 contract and projectId 0, it's a Chromie Squiggle
+          if (normalizedAddress === '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a' && projectId === 0) {
+            projectName = 'Chromie Squiggle';
+            artistName = 'Snowfro';
+          } else {
+            const contractType = contractNames[normalizedAddress] || 'Art Blocks';
+            projectName = `${contractType} #${projectId}`;
+            artistName = 'Unknown Artist';
+          }
+        }
+      }
+    }
   }
   
-  return {
+  // Create result object
+  const result = {
     projectId,
     tokenNumber,
     projectName,
@@ -379,10 +504,48 @@ async function getProjectDetails(tokenId, contractAddress) {
     contractAddress: normalizedAddress,
     artBlocksUrl: `https://www.artblocks.io/token/${normalizedAddress}/${tokenId}`
   };
+  
+  // Cache the result with timestamp
+  tokenMetadataCache[cacheKey] = {
+    data: result,
+    timestamp: Date.now()
+  };
+  
+  console.log(`Project: ${result.projectName}, Artist: ${result.artistName}, Token: ${result.tokenNumber}`);
+  
+  return result;
 }
 
-// Function to send a tweet with improved rate limit handling
+// Function to check Twitter's status before tweeting
+async function checkTwitterStatus() {
+  // If we've hit rate limits recently, we should wait longer
+  const now = Date.now();
+  const timeSinceLastRateLimit = now - lastRateLimitTime;
+  
+  if (lastRateLimitTime > 0 && timeSinceLastRateLimit < 30 * 60 * 1000) {
+    // Less than 30 minutes since last rate limit
+    const remainingCooldown = 30 * 60 * 1000 - timeSinceLastRateLimit;
+    const minutes = Math.ceil(remainingCooldown / 60000);
+    console.log(`Twitter appears to be rate limited. Recommended to wait ${minutes} more minutes before tweeting.`);
+    return false;
+  }
+  
+  return true;
+}
+
+// Modified to either send tweet or just preview based on configuration
 async function sendTweet(message) {
+  // If tweets are disabled, just log a preview
+  if (CONFIG.DISABLE_TWEETS) {
+    console.log('\n--- TWEET PREVIEW (DISABLED) ---\n');
+    console.log(message);
+    console.log('\n---------------------\n');
+    
+    // Return fake successful tweet object
+    return { data: { id: 'preview-only-' + Date.now() } };
+  }
+  
+  // Otherwise, proceed with actual tweeting
   if (!twitterClient) {
     console.error('Cannot send tweet - Twitter client not initialized');
     return null;
@@ -431,9 +594,16 @@ async function sendTweet(message) {
   });
 }
 
-// Function to process the tweet queue
+// Function to process the tweet queue with rate limiting
 async function processTweetQueue() {
   if (isTweetProcessing || tweetQueue.length === 0) {
+    return;
+  }
+  
+  // Don't process queue for first 5 minutes after startup
+  if (Date.now() - appStartTime < CONFIG.INITIAL_STARTUP_DELAY) {
+    console.log("App recently started; waiting before processing tweet queue");
+    setTimeout(processTweetQueue, 60000);
     return;
   }
   
@@ -471,7 +641,7 @@ async function processTweetQueue() {
       await new Promise(resolve => setTimeout(resolve, extraDelay));
     }
     
-    // Send the tweet
+    // Send the tweet (or preview if disabled)
     try {
       await sendTweet(message);
       // Reset failure count on success
@@ -675,14 +845,6 @@ async function processTransaction(tx, contractAddress) {
       }
     }
     
-    // Method 3: Last resort for specific OpenSea transactions
-    // If we know this particular tx is a Seaport sale that's hard to decode
-    if (priceEth === 0 && tx.hash === '0x0be5a49ce4dab1f26bd98c39b37bc22822f4ec2b8ee673c8a6b71d15ff12a4df') {
-      // This makes it clear we're using blockchain-based knowledge, not hardcoding
-      console.log('Known OpenSea Seaport transaction - the sale price was 4.3 ETH based on blockchain records');
-      priceEth = 4.3;
-    }
-    
     console.log(`Final sale price: ${priceEth} ETH`);
     
     // Skip if below minimum price or zero
@@ -691,29 +853,13 @@ async function processTransaction(tx, contractAddress) {
       return;
     }
     
-    // For this specific contract, check if we need to add a project mapping
-    // Add the record if we're missing it
-    const normalizedAddress = contractAddress.toLowerCase();
-    const projectId = Math.floor(tokenId / 1000000);
-    const tokenNumber = tokenId % 1000000;
-    
-    // Ensure we have project info for this collection
-    if (!projectInfo[normalizedAddress]) {
-      projectInfo[normalizedAddress] = {};
-      
-      // If this is the Flagship V0 contract, add default Chromie Squiggle info
-      if (normalizedAddress === '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a') {
-        projectInfo[normalizedAddress][0] = { name: 'Chromie Squiggle', artist: 'Snowfro' };
-      }
-    }
-    
     // Get project details
     const details = await getProjectDetails(tokenId, contractAddress);
     console.log('Project details:', JSON.stringify(details, null, 2));
     
     // Get ETH/USD price
     const ethPrice = await getEthPrice();
-    const usdPrice = ethPrice ? (priceEth * ethPrice).toFixed(2) : null;
+    const usdPrice = ethPrice ? (priceEth * ethPrice) : null;
     
     // Get buyer info (using toAddress from Transfer event)
     let buyerDisplay = formatAddress(toAddress);
@@ -735,7 +881,7 @@ async function processTransaction(tx, contractAddress) {
     tweetText += `\nsold for ${formatPrice(priceEth)} ETH`;
     
     if (usdPrice) {
-      tweetText += ` ($${usdPrice.toLocaleString()})`;
+      tweetText += ` ($${formatPrice(usdPrice)})`;
     }
     
     tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
@@ -897,14 +1043,6 @@ async function testTransactionOutput(txHash, contractAddress) {
       }
     }
     
-    // Method 3: Last resort for specific OpenSea transactions
-    // If we know this particular tx is a Seaport sale that's hard to decode
-    if (priceEth === 0 && txHash === '0x0be5a49ce4dab1f26bd98c39b37bc22822f4ec2b8ee673c8a6b71d15ff12a4df') {
-      // This makes it clear we're using blockchain-based knowledge, not hardcoding
-      console.log('Known OpenSea Seaport transaction - the sale price was 4.3 ETH based on blockchain records');
-      priceEth = 4.3;
-    }
-    
     console.log(`Final sale price: ${priceEth} ETH`);
     
     // Skip if below minimum price or zero
@@ -913,29 +1051,13 @@ async function testTransactionOutput(txHash, contractAddress) {
       return false;
     }
     
-    // For this specific contract, check if we need to add a project mapping
-    // Add the record if we're missing it
-    const normalizedAddress = contractAddress.toLowerCase();
-    const projectId = Math.floor(tokenId / 1000000);
-    const tokenNumber = tokenId % 1000000;
-    
-    // Ensure we have project info for this collection
-    if (!projectInfo[normalizedAddress]) {
-      projectInfo[normalizedAddress] = {};
-      
-      // If this is the Flagship V0 contract, add default Chromie Squiggle info
-      if (normalizedAddress === '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a') {
-        projectInfo[normalizedAddress][0] = { name: 'Chromie Squiggle', artist: 'Snowfro' };
-      }
-    }
-    
     // Get project details
     const details = await getProjectDetails(tokenId, contractAddress);
     console.log('Project details:', JSON.stringify(details, null, 2));
     
     // Get ETH/USD price
     const ethPrice = await getEthPrice();
-    const usdPrice = ethPrice ? (priceEth * ethPrice).toFixed(2) : null;
+    const usdPrice = ethPrice ? (priceEth * ethPrice) : null;
     
     // Get buyer info (using toAddress from Transfer event)
     let buyerDisplay = formatAddress(toAddress);
@@ -957,7 +1079,7 @@ async function testTransactionOutput(txHash, contractAddress) {
     tweetText += `\nsold for ${formatPrice(priceEth)} ETH`;
     
     if (usdPrice) {
-      tweetText += ` ($${usdPrice.toLocaleString()})`;
+      tweetText += ` ($${formatPrice(usdPrice)})`;
     }
     
     tweetText += `\nto ${buyerDisplay}\n\n${details.artBlocksUrl}`;
@@ -1002,8 +1124,16 @@ async function monitorSales() {
     
     console.log('Bot setup complete and running...');
     
-    // Send initial test tweet
-    await sendTestTweet();
+    // Send initial test tweet after a delay
+    if (!CONFIG.DISABLE_TWEETS) {
+      console.log(`Waiting ${CONFIG.INITIAL_STARTUP_DELAY/60000} minutes before sending first tweet...`);
+      setTimeout(async () => {
+        await sendTestTweet();
+      }, CONFIG.INITIAL_STARTUP_DELAY);
+    } else {
+      console.log('Tweets are disabled. The bot will only preview tweets in the console.');
+      console.log('To enable tweets, use the /enable-tweets endpoint.');
+    }
   } catch (error) {
     console.error('Error in monitorSales function:', error);
   }
