@@ -39,6 +39,10 @@ let tweetQueue = [];
 let isTweetProcessing = false;
 let lastTweetTime = 0;
 
+// Twitter rate limit tracking
+let tweetFailures = 0;
+let lastRateLimitTime = 0;
+
 // Cache for ETH price
 let ethPriceCache = {
   price: null,
@@ -82,6 +86,23 @@ const projectInfo = {
   // Add other contracts as needed
 };
 
+// Function to check Twitter's status before tweeting
+async function checkTwitterStatus() {
+  // If we've hit rate limits recently, we should wait longer
+  const now = Date.now();
+  const timeSinceLastRateLimit = now - lastRateLimitTime;
+  
+  if (lastRateLimitTime > 0 && timeSinceLastRateLimit < 30 * 60 * 1000) {
+    // Less than 30 minutes since last rate limit
+    const remainingCooldown = 30 * 60 * 1000 - timeSinceLastRateLimit;
+    const minutes = Math.ceil(remainingCooldown / 60000);
+    console.log(`Twitter appears to be rate limited. Recommended to wait ${minutes} more minutes before tweeting.`);
+    return false;
+  }
+  
+  return true;
+}
+
 // Initialize HTTP server for health checks and manual triggers
 const server = http.createServer((req, res) => {
   if (req.url === '/trigger-tweet') {
@@ -100,7 +121,12 @@ const server = http.createServer((req, res) => {
     res.end('Bot is healthy. Last checked: ' + new Date().toISOString());
   } else if (req.url === '/queue-status') {
     res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end(`Tweet queue status: ${tweetQueue.length} tweets waiting. Last tweet sent: ${new Date(lastTweetTime).toISOString()}`);
+    res.end(`Tweet queue status: ${tweetQueue.length} tweets waiting. Last tweet sent: ${new Date(lastTweetTime).toISOString()}. Failures: ${tweetFailures}.`);
+  } else if (req.url === '/reset-rate-limit') {
+    tweetFailures = 0;
+    lastRateLimitTime = 0;
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Rate limit state has been reset.');
   } else if (req.url === '/test-eth-price') {
     getEthPrice()
       .then(price => {
@@ -378,10 +404,15 @@ async function sendTweet(message) {
       }
       
       // Special handling for rate limits
-      if (error.code === 429 || error.message.includes('rate limit')) {
-        console.error(`Rate limit exceeded (attempt ${attempt}). Will retry after longer delay.`);
-        // Add increasing backoff for rate limits
-        await new Promise(resolve => setTimeout(resolve, attempt * 60000)); // Wait 1, 2, 3 minutes between retries
+      if (error.code === 429 || error.message.includes('rate limit') || error.message.includes('429')) {
+        const delaySeconds = attempt * 120; // 2, 4, 6 minutes between retries
+        console.error(`Rate limit exceeded (attempt ${attempt}). Will retry after ${delaySeconds} seconds.`);
+        
+        // Record rate limit time
+        lastRateLimitTime = Date.now();
+        
+        // Add fixed increasing delay for rate limits
+        await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
       }
       
       console.error(`Tweet attempt ${attempt} failed:`, error.message);
@@ -390,11 +421,12 @@ async function sendTweet(message) {
   }, {
     retries: CONFIG.MAX_RETRIES,
     minTimeout: CONFIG.RETRY_DELAY,
-    maxTimeout: 180000, // 3 minutes max
-    factor: 3, // Exponential backoff factor
+    maxTimeout: 360000, // 6 minutes max
+    factor: 2, // Exponential backoff factor
     onRetry: (error) => {
-      const waitTime = Math.min(CONFIG.RETRY_DELAY * Math.pow(3, error.attemptNumber), 180000);
-      console.log(`Retrying tweet after ${waitTime/1000} seconds due to error: ${error.message}`);
+      // Use a simpler, fixed calculation to avoid NaN
+      const seconds = Math.min(60 * error.attemptNumber, 360); // 1, 2, 3, 4, 5, 6 minutes
+      console.log(`Retrying tweet after ${seconds} seconds due to error: ${error.message}`);
     }
   });
 }
@@ -408,21 +440,51 @@ async function processTweetQueue() {
   isTweetProcessing = true;
   
   try {
+    // Check Twitter status first
+    const twitterReady = await checkTwitterStatus();
+    if (!twitterReady) {
+      console.log("Twitter appears to be rate limited. Delaying queue processing.");
+      isTweetProcessing = false;
+      // Try again after 5 minutes
+      setTimeout(processTweetQueue, 5 * 60 * 1000);
+      return;
+    }
+    
     // Check if we need to wait before sending next tweet
     const now = Date.now();
     const timeSinceLastTweet = now - lastTweetTime;
     
     if (timeSinceLastTweet < CONFIG.MIN_TIME_BETWEEN_TWEETS && lastTweetTime > 0) {
       const waitTime = CONFIG.MIN_TIME_BETWEEN_TWEETS - timeSinceLastTweet;
-      console.log(`Waiting ${waitTime/1000} seconds before sending next tweet due to rate limiting...`);
+      const waitMinutes = Math.ceil(waitTime / 60000);
+      console.log(`Waiting ${waitMinutes} minutes before sending next tweet due to rate limiting...`);
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
     
     // Get next tweet from queue
     const message = tweetQueue.shift();
     
+    // Check if Twitter might be rate limited
+    if (tweetFailures > 0) {
+      const extraDelay = tweetFailures * 3 * 60 * 1000; // 3, 6, 9 minutes based on previous failures
+      console.log(`Adding extra ${extraDelay/60000} minutes delay due to previous ${tweetFailures} failed attempts`);
+      await new Promise(resolve => setTimeout(resolve, extraDelay));
+    }
+    
     // Send the tweet
-    await sendTweet(message);
+    try {
+      await sendTweet(message);
+      // Reset failure count on success
+      tweetFailures = 0;
+    } catch (error) {
+      // Increment failure count
+      tweetFailures++;
+      console.error(`Tweet failed (total failures: ${tweetFailures}):`, error);
+      // Put message back in queue if it's not a permanent error
+      if (!error.message.includes('403')) {
+        tweetQueue.unshift(message);
+      }
+    }
     
     // Update last tweet time
     lastTweetTime = Date.now();
@@ -431,10 +493,10 @@ async function processTweetQueue() {
   } finally {
     isTweetProcessing = false;
     
-    // Process next tweet in queue if any
+    // Process next tweet in queue if any, with a delay if there have been failures
     if (tweetQueue.length > 0) {
-      // Small delay to avoid hitting rate limits
-      setTimeout(processTweetQueue, 1000);
+      const nextDelay = tweetFailures > 0 ? 5 * 60 * 1000 : 1000; // 5 minutes if failures, 1 second otherwise
+      setTimeout(processTweetQueue, nextDelay);
     }
   }
 }
