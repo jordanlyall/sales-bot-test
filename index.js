@@ -1319,6 +1319,29 @@ class TransactionProcessor {
         }
       }
       
+      // Extract project name and artist for AI context
+      let projectName = details.projectName.replace(/ #\d+$/, '');
+      let artistName = null;
+      
+      // Check if project name contains "by Artist" format
+      const byMatch = projectName.match(/(.+) by (.+?)$/i);
+      if (byMatch && byMatch[1] && byMatch[2]) {
+        // Extract the artist from the project name
+        artistName = byMatch[2].trim();
+        // And simplify the project name
+        projectName = byMatch[1].trim();
+      } else if (details.artistName && !(details.artistName.startsWith('0x') && details.artistName.length === 42)) {
+        artistName = details.artistName;
+      }
+      
+      // Generate AI context directly here, even for regular transactions
+      console.log(`Generating AI context for tweet: ${projectName}, Artist: ${artistName}`);
+      const aiContext = await this.tweets.generateAIContext(details, projectName, artistName);
+      console.log(`AI context generated: ${aiContext || 'None'}`);
+      
+      // Add AI context to details object so formatSaleTweet can access it
+      details.aiContext = aiContext;
+      
       // Format tweet
       const tweetText = await this.tweets.formatSaleTweet(details, priceEth, usdPrice, buyerDisplay);
       
