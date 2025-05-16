@@ -126,19 +126,69 @@ class ApiServices {
     }
 
     try {
-      const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
-        params: { ids: 'ethereum', vs_currencies: 'usd' }
-      });
+      // Try multiple price sources in sequence
       
-      const ethPrice = response.data.ethereum?.usd || 3000; // Fallback price
-      console.log(`Got ETH price from CoinGecko API: $${ethPrice}`);
+      // First try CoinGecko
+      try {
+        const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
+          params: { ids: 'ethereum', vs_currencies: 'usd' }
+        });
+        
+        if (response.data?.ethereum?.usd) {
+          const ethPrice = response.data.ethereum.usd;
+          console.log(`Got ETH price from CoinGecko API: ${ethPrice}`);
+          
+          // Update cache
+          this.ethPriceCache = { price: ethPrice, timestamp: now };
+          return ethPrice;
+        }
+      } catch (coinGeckoError) {
+        console.error('CoinGecko API error:', coinGeckoError.message);
+      }
       
-      // Update cache
-      this.ethPriceCache = { price: ethPrice, timestamp: now };
-      return ethPrice;
+      // If CoinGecko failed, try CryptoCompare as fallback
+      try {
+        const response = await axios.get('https://min-api.cryptocompare.com/data/price', {
+          params: { fsym: 'ETH', tsyms: 'USD' }
+        });
+        
+        if (response.data?.USD) {
+          const ethPrice = response.data.USD;
+          console.log(`Got ETH price from CryptoCompare API: ${ethPrice}`);
+          
+          // Update cache
+          this.ethPriceCache = { price: ethPrice, timestamp: now };
+          return ethPrice;
+        }
+      } catch (cryptoCompareError) {
+        console.error('CryptoCompare API error:', cryptoCompareError.message);
+      }
+      
+      // Last resort - try Binance API
+      try {
+        const response = await axios.get('https://api.binance.com/api/v3/ticker/price', {
+          params: { symbol: 'ETHUSDT' }
+        });
+        
+        if (response.data?.price) {
+          const ethPrice = parseFloat(response.data.price);
+          console.log(`Got ETH price from Binance API: ${ethPrice}`);
+          
+          // Update cache
+          this.ethPriceCache = { price: ethPrice, timestamp: now };
+          return ethPrice;
+        }
+      } catch (binanceError) {
+        console.error('Binance API error:', binanceError.message);
+      }
+      
+      // If all APIs failed, fall back to cached price or default
+      console.error('All ETH price APIs failed, using fallback price');
+      return this.ethPriceCache.price || 2500; // More reasonable fallback
+      
     } catch (error) {
-      console.error('Error fetching ETH price from CoinGecko:', error.message);
-      return this.ethPriceCache.price || 3000;
+      console.error('Error fetching ETH price:', error.message);
+      return this.ethPriceCache.price || 2500;
     }
   }
 
