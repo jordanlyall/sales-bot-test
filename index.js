@@ -1095,38 +1095,89 @@ class TweetManager {
     return tweetText;
   }
   async generateAIContext(details, projectName, artistName) {
-    try {
-      // Check if OpenAI is configured
-      if (!process.env.OPENAI_API_KEY) {
-        console.log('OpenAI API key not configured, skipping AI context');
-        return null;
-      }
-
-      const { OpenAI } = require('openai');
-      const openai = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY,
-      });
-      
-      // Generate prompt about the artwork
-      const prompt = `Provide a brief, interesting fact about the Art Blocks NFT "${projectName}" by ${artistName} in 15 words or less.`;
-      
-      // Call OpenAI API
-      const response = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
-        messages: [
-          {role: "system", content: "You are a helpful assistant that provides brief, engaging facts about NFT art."},
-          {role: "user", content: prompt}
-        ],
-        max_tokens: 30,
-        temperature: 0.7,
-      });
-      
-      return response.choices[0].message.content.trim();
-    } catch (error) {
-      console.error('OpenAI API error:', error.message);
+  try {
+    // Check if OpenAI is configured
+    if (!process.env.OPENAI_API_KEY) {
+      console.log('OpenAI API key not configured, skipping AI context');
       return null;
     }
+
+    // Extract description and traits if available
+    let description = details.description || '';
+    let traits = [];
+    
+    // Try to extract traits from the fullData if available
+    if (details.fullData) {
+      // Look for traits in various possible locations based on the API source
+      if (details.fullData.traits) {
+        traits = details.fullData.traits;
+      } else if (details.fullData.attributes) {
+        traits = details.fullData.attributes;
+      } else if (details.fullData.metadata?.attributes) {
+        traits = details.fullData.metadata.attributes;
+      } else if (details.fullData.rawMetadata?.attributes) {
+        traits = details.fullData.rawMetadata.attributes;
+      }
+    }
+    
+    // Format traits for the prompt
+    let traitsText = '';
+    if (Array.isArray(traits) && traits.length > 0) {
+      traitsText = traits.map(trait => {
+        if (trait.trait_type && trait.value) {
+          return `${trait.trait_type}: ${trait.value}`;
+        } else if (typeof trait === 'object') {
+          // Handle non-standard trait formats
+          const key = Object.keys(trait).find(k => k !== 'value' && k !== 'trait_type');
+          return key ? `${key}: ${trait[key]}` : '';
+        }
+        return '';
+      }).filter(Boolean).join(', ');
+    }
+    
+    console.log(`Description length: ${description.length}, Traits: ${traitsText || 'None found'}`);
+
+    const { OpenAI } = require('openai');
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+    
+    // Create a detailed prompt with all available information
+    const prompt = `
+    Project Name: "${projectName}" by artist ${artistName}
+    ${description ? `Project Description: "${description.substring(0, 500)}"` : ''}
+    ${traitsText ? `Token Traits: ${traitsText}` : ''}
+    
+    Based on the information above, provide a compelling, specific, and unique fact about this NFT.
+    Focus on ONE distinctive aspect of the artwork, its aesthetics, creation process, or meaning.
+    Mention specific traits or visual elements if known. Keep it under 25 words.
+    Make it interesting and specific enough that it would entice someone to look at the artwork.
+    `;
+    
+    // Call OpenAI API with improved parameters
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini", // Using a more capable model if available, or you can use "gpt-3.5-turbo"
+      messages: [
+        {role: "system", content: "You are an expert art critic who specializes in generative and algorithmic art. You provide insightful, specific observations about NFT artworks, focusing on their unique properties and artistic significance."},
+        {role: "user", content: prompt}
+      ],
+      max_tokens: 60,
+      temperature: 0.8, // Slightly higher temperature for more creative outputs
+    });
+    
+    // Clean up the response
+    let artContext = response.choices[0].message.content.trim();
+    
+    // Remove quotes if present
+    artContext = artContext.replace(/^["'](.*)["']$/, '$1');
+    
+    console.log(`Generated enhanced art context: ${artContext}`);
+    return artContext;
+  } catch (error) {
+    console.error('OpenAI API error:', error.message);
+    return null;
   }
+}
 }
 
 // =========================================================
