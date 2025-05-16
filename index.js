@@ -136,7 +136,7 @@ class ApiServices {
         
         if (response.data?.ethereum?.usd) {
           const ethPrice = response.data.ethereum.usd;
-          console.log(`Got ETH price from CoinGecko API: ${ethPrice}`);
+          console.log(`Got ETH price from CoinGecko API: $${ethPrice}`);
           
           // Update cache
           this.ethPriceCache = { price: ethPrice, timestamp: now };
@@ -154,7 +154,7 @@ class ApiServices {
         
         if (response.data?.USD) {
           const ethPrice = response.data.USD;
-          console.log(`Got ETH price from CryptoCompare API: ${ethPrice}`);
+          console.log(`Got ETH price from CryptoCompare API: $${ethPrice}`);
           
           // Update cache
           this.ethPriceCache = { price: ethPrice, timestamp: now };
@@ -172,7 +172,7 @@ class ApiServices {
         
         if (response.data?.price) {
           const ethPrice = parseFloat(response.data.price);
-          console.log(`Got ETH price from Binance API: ${ethPrice}`);
+          console.log(`Got ETH price from Binance API: $${ethPrice}`);
           
           // Update cache
           this.ethPriceCache = { price: ethPrice, timestamp: now };
@@ -858,7 +858,7 @@ class TweetManager {
     tweetText += `sold for ${this.formatPrice(priceEth)} ETH`;
     
     if (usdPrice) {
-      tweetText += ` (${this.formatPrice(usdPrice)})`;
+      tweetText += ` ($${this.formatPrice(usdPrice)})`;
     }
     
     // Add buyer info and URL
@@ -867,7 +867,7 @@ class TweetManager {
     // Debug output to verify the tweet format
     console.log('\n--- FORMATTED TWEET ---\n');
     console.log(`${projectName} #${tokenNumber} by ${details.artistName}`);
-    console.log(`sold for ${this.formatPrice(priceEth)} ETH${usdPrice ? ` (${this.formatPrice(usdPrice)})` : ''}`);
+    console.log(`sold for ${this.formatPrice(priceEth)} ETH${usdPrice ? ` ($${this.formatPrice(usdPrice)})` : ''}`);
     console.log(`to ${buyerDisplay}`);
     console.log();
     console.log(details.artBlocksUrl);
@@ -1463,7 +1463,6 @@ class ServerManager {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const txHash = url.searchParams.get('hash');
     const forceRefresh = url.searchParams.get('refresh') === 'true';
-    const format = url.searchParams.get('format') || 'html'; // Default to HTML format
     
     if (!txHash) {
       res.writeHead(400, {'Content-Type': 'text/plain'});
@@ -1502,477 +1501,56 @@ class ServerManager {
         
         // Clear cache if forced refresh is requested
         if (forceRefresh) {
-          console.log("Force refresh requested - clearing metadata cache before processing");
-          
-          // Find the token ID in the logs
-          const transferEvents = receipt.logs.filter(log => {
-            const isFromMonitoredContract = log.address.toLowerCase() === foundContract.toLowerCase();
-            const isTransferEvent = log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
-            return isFromMonitoredContract && isTransferEvent;
-          });
-          
-          if (transferEvents.length > 0) {
-            const transferEvent = transferEvents[transferEvents.length - 1];
-            let tokenId;
-            if (transferEvent.topics.length > 3) {
-              tokenId = parseInt(transferEvent.topics[3], 16);
-            } else {
-              tokenId = parseInt(transferEvent.data, 16);
-            }
-            
-            const cacheKey = `${foundContract.toLowerCase()}-${tokenId}`;
-            if (this.api.tokenMetadataCache[cacheKey]) {
-              delete this.api.tokenMetadataCache[cacheKey];
-              console.log(`Cleared cache for ${cacheKey}`);
-            }
-          }
+          console.log("Force refresh requested - clearing cache before processing");
+          this.api.clearCaches();
         }
         
         // Now process with the detected contract
-        return this.txProcessor.testTransactionOutput(txHash, foundContract)
-          .then(result => {
-            if (result.success) {
-              if (format === 'json') {
-                // Return JSON result
-                res.writeHead(200, {'Content-Type': 'application/json'});
-                res.end(JSON.stringify(result, null, 2));
-              } else {
-                // Return HTML formatted result
-                const htmlResponse = this.generateTweetPreviewHtml(result, txHash);
-                res.writeHead(200, {'Content-Type': 'text/html'});
-                res.end(htmlResponse);
-              }
-            } else {
-              if (format === 'json') {
-                res.writeHead(400, {'Content-Type': 'application/json'});
-                res.end(JSON.stringify(result, null, 2));
-              } else {
-                res.writeHead(400, {'Content-Type': 'text/html'});
-                res.end(`<html><body><h1>Error Processing Transaction</h1><p>${result.error || 'Unknown error'}</p></body></html>`);
-              }
-            }
-          });
+        return this.txProcessor.testTransactionOutput(txHash, foundContract);
       })
-      .catch(err => {
-        res.writeHead(500, {'Content-Type': 'text/plain'});
-        res.end('Error: ' + err.message);
-      });
-  }
-  
-  // Helper method to generate HTML for tweet preview
-  generateTweetPreviewHtml(result, txHash) {
-    const { tweet, metadata } = result;
-    const tweetLines = tweet.split('\n');
-    
-    return `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Tweet Preview</title>
-      <style>
-        body {
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-          max-width: 600px;
-          margin: 0 auto;
-          padding: 20px;
-          background-color: #f7f9f9;
-          color: #0f1419;
-        }
-        .header {
-          margin-bottom: 20px;
-        }
-        .tweet-container {
-          background-color: white;
-          border-radius: 12px;
-          padding: 20px;
-          margin-bottom: 20px;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-        }
-        .tweet-text {
-          font-size: 16px;
-          line-height: 1.4;
-          white-space: pre-wrap;
-        }
-        .project-title {
-          font-weight: bold;
-          font-size: 18px;
-          color: #0f1419;
-        }
-        .price-info {
-          margin-top: 8px;
-        }
-        .buyer-info {
-          margin-top: 8px;
-        }
-        .url-link {
-          margin-top: 12px;
-          word-break: break-all;
-        }
-        .url-link a {
-          color: #1d9bf0;
-          text-decoration: none;
-        }
-        .url-link a:hover {
-          text-decoration: underline;
-        }
-        .metadata {
-          background-color: white;
-          border-radius: 12px;
-          padding: 20px;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-        }
-        .metadata-title {
-          font-weight: bold;
-          margin-bottom: 10px;
-        }
-        .metadata-item {
-          margin-bottom: 5px;
-        }
-        .metadata-label {
-          font-weight: bold;
-          display: inline-block;
-          width: 120px;
-        }
-        .options {
-          margin-top: 20px;
-        }
-        .button {
-          display: inline-block;
-          padding: 8px 16px;
-          background-color: #1d9bf0;
-          color: white;
-          border-radius: 20px;
-          text-decoration: none;
-          margin-right: 10px;
-          font-weight: bold;
-        }
-        .button:hover {
-          background-color: #1a8cd8;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="header">
-        <h1>Tweet Preview</h1>
-        <p>Transaction: ${txHash}</p>
-      </div>
-      
-      <div class="tweet-container">
-        <div class="tweet-text">
-          <div class="project-title">${tweetLines[0] || ''}</div>
-          <div class="price-info">${tweetLines[1] || ''}</div>
-          <div class="buyer-info">${tweetLines[2] || ''}</div>
-          <div class="url-link"><a href="${metadata.url}" target="_blank">${metadata.url}</a></div>
-        </div>
-      </div>
-      
-      <div class="metadata">
-        <div class="metadata-title">Transaction Metadata</div>
-        <div class="metadata-item"><span class="metadata-label">Contract:</span> ${metadata.contract}</div>
-        <div class="metadata-item"><span class="metadata-label">Token ID:</span> ${metadata.tokenId}</div>
-        <div class="metadata-item"><span class="metadata-label">Project:</span> ${metadata.projectName}</div>
-        <div class="metadata-item"><span class="metadata-label">Artist:</span> ${metadata.artistName}</div>
-        <div class="metadata-item"><span class="metadata-label">Token #:</span> ${metadata.tokenNumber}</div>
-        <div class="metadata-item"><span class="metadata-label">Price:</span> ${metadata.priceEth} ETH (${metadata.priceUsd ? '
-
-  handleTestMetadata(req, res) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const tokenId = url.searchParams.get('tokenId');
-    const contractAddress = url.searchParams.get('contract') || this.config.CONTRACT_ADDRESSES[0];
-    const forceRefresh = url.searchParams.get('refresh') === 'true';
-    
-    if (!tokenId) {
-      res.writeHead(400, {'Content-Type': 'text/plain'});
-      res.end('Error: Missing tokenId. Use ?tokenId=1506 in the URL');
-      return;
-    }
-    
-    console.log(`Testing metadata retrieval for token: ${tokenId} on contract: ${contractAddress}, force refresh: ${forceRefresh}`);
-    
-    // Clear cache for this token if forced refresh is requested
-    if (forceRefresh) {
-      const cacheKey = `${contractAddress.toLowerCase()}-${tokenId}`;
-      if (this.api.tokenMetadataCache[cacheKey]) {
-        delete this.api.tokenMetadataCache[cacheKey];
-        console.log(`Cleared cache for ${cacheKey}`);
-      }
-    }
-    
-    this.metadata.getProjectDetails(tokenId, contractAddress)
-      .then(details => {
-        res.writeHead(200, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify(details, null, 2));
-      })
-      .catch(err => {
-        res.writeHead(500, {'Content-Type': 'text/plain'});
-        res.end('Error: ' + err.message);
-      });
-  }
-
-  handleDebugMetadata(req, res) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const tokenId = url.searchParams.get('tokenId');
-    const contractAddress = url.searchParams.get('contract') || this.config.CONTRACT_ADDRESSES[0];
-    
-    if (!tokenId) {
-      res.writeHead(400, {'Content-Type': 'text/plain'});
-      res.end('Error: Missing tokenId. Use ?tokenId=1506 in the URL');
-      return;
-    }
-    
-    console.log(`Debugging metadata for token: ${tokenId} on contract: ${contractAddress}`);
-    
-    // Get OpenSea metadata
-    this.api.getOpenSeaAssetMetadata(contractAddress, tokenId)
-      .then(openSeaData => {
-        // Get Art Blocks API data
-        return this.api.getArtBlocksTokenInfo(tokenId, contractAddress)
-          .then(artBlocksData => {
-            // Get Alchemy metadata
-            return this.api.getAlchemyMetadata(contractAddress, tokenId)
-              .then(alchemyData => {
-                // Compile all results
-                const result = {
-                  openSeaApi: openSeaData,
-                  artBlocksApi: artBlocksData,
-                  alchemyApi: alchemyData,
-                  finalMetadata: null
-                };
-                
-                // Now get the final combined metadata
-                return this.metadata.getProjectDetails(tokenId, contractAddress)
-                  .then(finalData => {
-                    result.finalMetadata = finalData;
-                    
-                    res.writeHead(200, {'Content-Type': 'application/json'});
-                    res.end(JSON.stringify(result, null, 2));
-                  });
-              });
-          });
-      })
-      .catch(err => {
-        res.writeHead(500, {'Content-Type': 'text/plain'});
-        res.end('Error: ' + err.message);
-      });
-  }
-  
-  handleTriggerOpenSeaEvents(req, res) {
-    res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end('Manually triggering OpenSea events check. Check logs for results.');
-    
-    // This will be executed after the response is sent
-    if (global.openSeaProcessor) {
-      global.openSeaProcessor.processOpenSeaEvents()
-        .then(() => {
-          console.log('Manual OpenSea events check completed');
-        })
-        .catch(err => {
-          console.error('Error in manual OpenSea events check:', err);
-        });
-    } else {
-      console.error('OpenSea processor not initialized');
-    }
-  }
-
-  handleClearCache(req, res) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const tokenId = url.searchParams.get('tokenId');
-    const contractAddress = url.searchParams.get('contract');
-    
-    if (tokenId && contractAddress) {
-      // Clear specific token cache
-      const cacheKey = `${contractAddress.toLowerCase()}-${tokenId}`;
-      if (this.api.tokenMetadataCache[cacheKey]) {
-        delete this.api.tokenMetadataCache[cacheKey];
-        res.writeHead(200, {'Content-Type': 'text/plain'});
-        res.end(`Cache cleared for specific token: ${contractAddress}/${tokenId}`);
-        return;
-      } else {
-        res.writeHead(200, {'Content-Type': 'text/plain'});
-        res.end(`No cache found for token: ${contractAddress}/${tokenId}`);
-        return;
-      }
-    }
-    
-    // Clear all caches
-    this.api.clearCaches();
-    
-    res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end('All caches have been cleared.');
-  }
-
-  handleHelp(req, res) {
-    const helpText = `
-Art Blocks Sales Bot - Available Endpoints:
-------------------------------------------
-
-/                   - Home page (bot status)
-/health             - Health check status
-/queue-status       - Check status of tweet queue
-/enable-tweets      - Enable sending real tweets
-/disable-tweets     - Disable tweets (preview only)
-/test-eth-price     - Test ETH price API
-/test-transaction?hash=0x... - Test transaction processing (auto-detects contract)
-/test-output?hash=0x...      - Preview tweet for a transaction (auto-detects contract)
-/test-metadata?tokenId=1506  - Test metadata retrieval for a specific token
-/debug-metadata?tokenId=1506 - Debug all API responses for a specific token
-/trigger-opensea-events      - Manually trigger OpenSea events check
-/clear-cache        - Clear metadata and price caches
-/reset-rate-limit   - Reset rate limit tracking
-/help               - Show this help page
-
-Example usage:
-/test-output?hash=0x123456...  - No need to specify contract, it will be auto-detected
-/test-metadata?tokenId=1506&contract=0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a - Test metadata for a specific token
-`;
-    
-    res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end(helpText);
-  }
-
-  handleRoot(req, res) {
-    res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end('Art Blocks Sales Bot is running. Visit /help for available endpoints.');
-  }
-}
-
-// =========================================================
-// MAIN APPLICATION CLASS
-// =========================================================
-
-class ArtBlocksSalesBot {
-  constructor() {
-    this.config = new Config();
-    this.apiServices = new ApiServices(this.config);
-    this.metadata = new MetadataManager(this.apiServices, this.config);
-    this.tweets = new TweetManager(this.apiServices, this.config);
-    this.txProcessor = new TransactionProcessor(this.apiServices, this.metadata, this.tweets, this.config);
-    this.openSeaProcessor = new OpenSeaEventProcessor(this.apiServices, this.metadata, this.tweets, this.config);
-    this.server = new ServerManager(this.apiServices, this.metadata, this.tweets, this.txProcessor, this.config);
-    
-    // Make the OpenSea processor globally accessible for manual triggers
-    global.openSeaProcessor = this.openSeaProcessor;
-  }
-
-  async initialize() {
-    console.log('Starting with environment check...');
-    this.checkEnvironment();
-    
-    // Initialize API services
-    this.apiServices.initTwitter();
-    this.apiServices.initAlchemy();
-    
-    // Start the HTTP server
-    this.server.setupServer();
-    
-    // Start OpenSea event polling (primary method)
-    this.openSeaProcessor.startEventPolling();
-    
-    // Start blockchain monitoring (backup method)
-    await this.monitorSales();
-    
-    // Setup health checks
-    this.setupHealthChecks();
-    
-    console.log('Art Blocks Sales Bot is now running with hybrid monitoring approach');
-  }
-
-  checkEnvironment() {
-    const requiredVars = [
-      'TWITTER_CONSUMER_KEY', 
-      'TWITTER_CONSUMER_SECRET',
-      'TWITTER_ACCESS_TOKEN',
-      'TWITTER_ACCESS_TOKEN_SECRET',
-      'ALCHEMY_API_KEY',
-      'OPENSEA_API_KEY'
-    ];
-
-    const missingVars = requiredVars.filter(varName => !process.env[varName]);
-    if (missingVars.length > 0) {
-      console.error(`Missing required environment variables: ${missingVars.join(', ')}`);
-      console.log('Continuing without some variables for debugging purposes');
-    }
-  }
-
-  async monitorSales() {
-    console.log('Starting blockchain monitoring of Art Blocks sales as backup...');
-    
-    try {
-      if (this.apiServices.alchemy) {
-        console.log('Setting up Alchemy websocket listener...');
-        
-        this.config.CONTRACT_ADDRESSES.forEach(contractAddress => {
-          console.log(`Setting up listener for contract: ${contractAddress}`);
+      .then(result => {
+        // Just return a plain text response
+        if (result.success) {
+          // Get the tweet content as plain text
+          const tweetText = result.tweet || "No tweet content available";
           
-          this.apiServices.alchemy.ws.on(
-            {
-              method: 'alchemy_pendingTransactions',
-              fromAddress: this.config.OPENSEA_ADDRESS,
-              toAddress: contractAddress,
-            },
-            (tx) => this.txProcessor.processTransaction(tx, contractAddress)
-          );
-        });
-        
-        console.log('Alchemy listeners set up successfully');
-      } else {
-        console.error('Alchemy client not initialized, blockchain monitoring disabled');
-      }
-      
-      console.log('Blockchain monitoring setup complete...');
-      
-      // Send initial test tweet after a delay
-      if (!this.config.DISABLE_TWEETS) {
-        console.log(`Waiting ${this.config.INITIAL_STARTUP_DELAY/60000} minutes before sending first tweet...`);
-        setTimeout(async () => {
-          await this.tweets.sendTestTweet();
-        }, this.config.INITIAL_STARTUP_DELAY);
-      } else {
-        console.log('Tweets are disabled. The bot will only preview tweets in the console.');
-        console.log('To enable tweets, use the /enable-tweets endpoint.');
-      }
-    } catch (error) {
-      console.error('Error in monitorSales function:', error);
-    }
-  }
-
-  setupHealthChecks() {
-    // Send a health check tweet once a day to verify the bot is still running
-    setInterval(async () => {
-      try {
-        console.log('Running health check...');
-        console.log(`Health check passed at ${new Date().toISOString()}`);
-      } catch (error) {
-        console.error('Health check failed:', error);
-      }
-    }, this.config.HEALTH_CHECK_INTERVAL);
-  }
-}
-
-// Start the bot
-(async () => {
-  try {
-    const bot = new ArtBlocksSalesBot();
-    await bot.initialize();
-  } catch (error) {
-    console.error('Error starting bot:', error);
-  }
-})();
- + this.tweets.formatPrice(metadata.priceUsd) : 'N/A'})</div>
-        <div class="metadata-item"><span class="metadata-label">Buyer:</span> ${metadata.buyer}</div>
-        <div class="metadata-item"><span class="metadata-label">From:</span> ${metadata.from}</div>
-        <div class="metadata-item"><span class="metadata-label">To:</span> ${metadata.to}</div>
-      </div>
-      
-      <div class="options">
-        <a href="/test-output?hash=${txHash}&refresh=true" class="button">Refresh Metadata</a>
-        <a href="/test-output?hash=${txHash}&format=json" class="button">View as JSON</a>
-      </div>
-    </body>
-    </html>
-    `;
+          // Add metadata as simple text
+          let response = "TWEET PREVIEW:\n\n" + tweetText + "\n\n";
+          response += "METADATA:\n";
+          
+          if (result.metadata) {
+            response += "Contract: " + result.metadata.contract + "\n";
+            response += "Token ID: " + result.metadata.tokenId + "\n";
+            response += "Project: " + result.metadata.projectName + "\n";
+            response += "Artist: " + result.metadata.artistName + "\n";
+            response += "Token #: " + result.metadata.tokenNumber + "\n";
+            
+            // Format price with USD if available
+            response += "Price: " + result.metadata.priceEth + " ETH";
+            if (result.metadata.priceUsd) {
+              response += " ($" + this.tweets.formatPrice(result.metadata.priceUsd) + ")";
+            }
+            response += "\n";
+            
+            response += "Buyer: " + result.metadata.buyer + "\n";
+            response += "From: " + result.metadata.from + "\n";
+            response += "To: " + result.metadata.to + "\n";
+            response += "URL: " + result.metadata.url + "\n";
+          }
+          
+          response += "\nTo refresh metadata: " + req.url + "&refresh=true";
+          
+          res.writeHead(200, {'Content-Type': 'text/plain'});
+          res.end(response);
+        } else {
+          res.writeHead(400, {'Content-Type': 'text/plain'});
+          res.end("Failed to process transaction: " + (result.error || "Unknown error"));
+        }
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error: ' + err.message);
+      });
   }
 
   handleTestMetadata(req, res) {
