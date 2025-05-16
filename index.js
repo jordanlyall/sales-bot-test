@@ -30,7 +30,14 @@ const CONFIG = {
   RETRY_DELAY: 3000,
   // Cache duration for ETH price in milliseconds
   ETH_PRICE_CACHE_DURATION: 900000, // 15 minutes
+  // Minimum time between tweets (15 minutes)
+  MIN_TIME_BETWEEN_TWEETS: 15 * 60 * 1000
 };
+
+// Tweet queue variables
+let tweetQueue = [];
+let isTweetProcessing = false;
+let lastTweetTime = 0;
 
 // Cache for ETH price
 let ethPriceCache = {
@@ -91,6 +98,19 @@ const server = http.createServer((req, res) => {
   } else if (req.url === '/health') {
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('Bot is healthy. Last checked: ' + new Date().toISOString());
+  } else if (req.url === '/queue-status') {
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end(`Tweet queue status: ${tweetQueue.length} tweets waiting. Last tweet sent: ${new Date(lastTweetTime).toISOString()}`);
+  } else if (req.url === '/test-eth-price') {
+    getEthPrice()
+      .then(price => {
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end(`Current ETH price: $${price}`);
+      })
+      .catch(err => {
+        res.writeHead(500, {'Content-Type': 'text/plain'});
+        res.end('Error getting ETH price: ' + err.message);
+      });
   } else if (req.url.startsWith('/test-transaction')) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const txHash = url.searchParams.get('hash');
@@ -213,7 +233,7 @@ function updateContractMapping() {
 // Generate OpenSea URLs for all contracts
 const contractMapping = updateContractMapping();
 
-// Function to get ETH to USD conversion rate using Alchemy Prices API
+// Function to get ETH to USD conversion rate using CoinGecko API
 async function getEthPrice() {
   // Check if we have a cached price that's still valid
   const now = Date.now();
@@ -222,23 +242,19 @@ async function getEthPrice() {
   }
 
   try {
-    // Use Alchemy Prices API to get current ETH/USD price
-    const response = await axios.get('https://prices.alchemy.com/api/v1/prices/symbols', {
+    // Try CoinGecko API (doesn't require an API key)
+    const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
       params: {
-        symbols: 'ETH',
-        currency: 'USD'
-      },
-      headers: {
-        'Accept': 'application/json',
-        'Alchemy-Aa-Api-Key': process.env.ALCHEMY_API_KEY
+        ids: 'ethereum',
+        vs_currencies: 'usd'
       }
     });
     
-    console.log('Alchemy Prices API response:', JSON.stringify(response.data, null, 2));
+    console.log('CoinGecko API response:', JSON.stringify(response.data, null, 2));
     
     // Extract ETH price from response
-    const ethPrice = response.data.symbols?.ETH?.price || 3000; // Fallback to 3000 if API fails
-    console.log(`Got ETH price from Alchemy API: $${ethPrice}`);
+    const ethPrice = response.data.ethereum?.usd || 3000; // Fallback to 3000 if API fails
+    console.log(`Got ETH price from CoinGecko API: $${ethPrice}`);
     
     // Update cache
     ethPriceCache = {
@@ -248,7 +264,8 @@ async function getEthPrice() {
     
     return ethPrice;
   } catch (error) {
-    console.error('Error fetching ETH price from Alchemy:', error.message);
+    console.error('Error fetching ETH price from CoinGecko:', error.message);
+    
     // Return last cached price or fallback
     return ethPriceCache.price || 3000;
   }
@@ -338,7 +355,7 @@ async function getProjectDetails(tokenId, contractAddress) {
   };
 }
 
-// Function to send a tweet with retry logic
+// Function to send a tweet with improved rate limit handling
 async function sendTweet(message) {
   if (!twitterClient) {
     console.error('Cannot send tweet - Twitter client not initialized');
@@ -360,21 +377,84 @@ async function sendTweet(message) {
         return null;
       }
       
+      // Special handling for rate limits
+      if (error.code === 429 || error.message.includes('rate limit')) {
+        console.error(`Rate limit exceeded (attempt ${attempt}). Will retry after longer delay.`);
+        // Add increasing backoff for rate limits
+        await new Promise(resolve => setTimeout(resolve, attempt * 60000)); // Wait 1, 2, 3 minutes between retries
+      }
+      
       console.error(`Tweet attempt ${attempt} failed:`, error.message);
       throw error; // This will trigger a retry
     }
   }, {
     retries: CONFIG.MAX_RETRIES,
     minTimeout: CONFIG.RETRY_DELAY,
+    maxTimeout: 180000, // 3 minutes max
+    factor: 3, // Exponential backoff factor
     onRetry: (error) => {
-      console.log(`Retrying tweet due to error: ${error.message}`);
+      const waitTime = Math.min(CONFIG.RETRY_DELAY * Math.pow(3, error.attemptNumber), 180000);
+      console.log(`Retrying tweet after ${waitTime/1000} seconds due to error: ${error.message}`);
     }
   });
 }
 
+// Function to process the tweet queue
+async function processTweetQueue() {
+  if (isTweetProcessing || tweetQueue.length === 0) {
+    return;
+  }
+  
+  isTweetProcessing = true;
+  
+  try {
+    // Check if we need to wait before sending next tweet
+    const now = Date.now();
+    const timeSinceLastTweet = now - lastTweetTime;
+    
+    if (timeSinceLastTweet < CONFIG.MIN_TIME_BETWEEN_TWEETS && lastTweetTime > 0) {
+      const waitTime = CONFIG.MIN_TIME_BETWEEN_TWEETS - timeSinceLastTweet;
+      console.log(`Waiting ${waitTime/1000} seconds before sending next tweet due to rate limiting...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    
+    // Get next tweet from queue
+    const message = tweetQueue.shift();
+    
+    // Send the tweet
+    await sendTweet(message);
+    
+    // Update last tweet time
+    lastTweetTime = Date.now();
+  } catch (error) {
+    console.error('Error processing tweet queue:', error);
+  } finally {
+    isTweetProcessing = false;
+    
+    // Process next tweet in queue if any
+    if (tweetQueue.length > 0) {
+      // Small delay to avoid hitting rate limits
+      setTimeout(processTweetQueue, 1000);
+    }
+  }
+}
+
+// Function to add tweets to queue instead of sending immediately
+function queueTweet(message) {
+  console.log('Adding tweet to queue:', message);
+  tweetQueue.push(message);
+  
+  // Start processing if not already running
+  if (!isTweetProcessing) {
+    processTweetQueue();
+  }
+  
+  return true; // Immediate response for non-blocking operation
+}
+
 // Function to send a test tweet
 async function sendTestTweet() {
-  return sendTweet(`Art Blocks sales bot is monitoring OpenSea sales for ${CONFIG.CONTRACT_ADDRESSES.length} contracts! (${new Date().toLocaleTimeString()})`);
+  return queueTweet(`Art Blocks sales bot is monitoring OpenSea sales for ${CONFIG.CONTRACT_ADDRESSES.length} contracts! (${new Date().toLocaleTimeString()})`);
 }
 
 // Function to format price with commas for thousands
@@ -600,8 +680,8 @@ async function processTransaction(tx, contractAddress) {
     
     console.log('Final tweet text:', tweetText);
     
-    // Send the tweet
-    await sendTweet(tweetText);
+    // Add tweet to queue instead of sending immediately
+    queueTweet(tweetText);
   } catch (error) {
     console.error('Error processing transaction:', error);
   }
