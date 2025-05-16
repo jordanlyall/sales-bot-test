@@ -65,7 +65,7 @@ const projectInfo = {
   },
   // Flagship V0
   '0x059edd72cd353df5106d2b9cc5ab83a52287ac3a': {
-    0: { name: 'Chromie Squiggle (Genesis)', artist: 'Snowfro' },
+    0: { name: 'Chromie Squiggle', artist: 'Snowfro' },
   },
   // Curated V3.2
   '0xab0000000000aa06f89b268d604a9c1c41524ac6': {
