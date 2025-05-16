@@ -1399,7 +1399,7 @@ class TransactionProcessor {
     return priceEth;
   }
 
-  async testTransactionOutput(txHash, contractAddress) {
+  async testTransactionOutput(txHash, contractAddress, includeAi = true) {
     try {
       console.log(`Testing output for transaction: ${txHash}`);
       
@@ -1478,6 +1478,34 @@ class TransactionProcessor {
         }
       }
       
+      // Generate AI context if requested
+      let aiContext = null;
+      if (includeAi) {
+        try {
+          // Extract project and artist name like in formatSaleTweet
+          let projectName = details.projectName.replace(/ #\d+$/, '');
+          let artistName = null;
+          
+          // Check if project name contains "by Artist" format
+          const byMatch = projectName.match(/(.+) by (.+?)$/i);
+          if (byMatch && byMatch[1] && byMatch[2]) {
+            // Extract the artist from the project name
+            artistName = byMatch[2].trim();
+            // And simplify the project name
+            projectName = byMatch[1].trim();
+          } else if (details.artistName && !(details.artistName.startsWith('0x') && details.artistName.length === 42)) {
+            artistName = details.artistName;
+          }
+          
+          console.log(`Generating AI context for test output - Project: ${projectName}, Artist: ${artistName}`);
+          aiContext = await this.tweets.generateAIContext(details, projectName, artistName);
+          console.log(`AI context generated: ${aiContext}`);
+        } catch (aiError) {
+          console.error('Error generating AI context for test:', aiError);
+          aiContext = null;
+        }
+      }
+      
       // Format tweet
       const tweetText = await this.tweets.formatSaleTweet(details, priceEth, usdPrice, buyerDisplay);
       
@@ -1499,7 +1527,8 @@ class TransactionProcessor {
           buyer: buyerDisplay,
           from: fromAddress,
           to: toAddress,
-          url: details.artBlocksUrl
+          url: details.artBlocksUrl,
+          aiContext: aiContext
         }
       };
     } catch (error) {
@@ -1800,6 +1829,7 @@ class ServerManager {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const txHash = url.searchParams.get('hash');
     const forceRefresh = url.searchParams.get('refresh') === 'true';
+    const includeAi = url.searchParams.get('ai') !== 'false'; // Default is to include AI
     
     if (!txHash) {
       res.writeHead(400, {'Content-Type': 'text/plain'});
@@ -1807,7 +1837,7 @@ class ServerManager {
       return;
     }
     
-    console.log(`Testing output for hash: ${txHash}, force refresh: ${forceRefresh}`);
+    console.log(`Testing output for hash: ${txHash}, force refresh: ${forceRefresh}, includeAi: ${includeAi}`);
     
     // First get the transaction to determine which contract is involved
     this.api.alchemy.core.getTransactionReceipt(txHash)
@@ -1843,7 +1873,7 @@ class ServerManager {
         }
         
         // Now process with the detected contract
-        return this.txProcessor.testTransactionOutput(txHash, foundContract);
+        return this.txProcessor.testTransactionOutput(txHash, foundContract, includeAi);
       })
       .then(result => {
         // Just return a plain text response
@@ -1873,9 +1903,22 @@ class ServerManager {
             response += "From: " + result.metadata.from + "\n";
             response += "To: " + result.metadata.to + "\n";
             response += "URL: " + result.metadata.url + "\n";
+            
+            // Add AI context if available
+            if (result.metadata.aiContext) {
+              response += "AI Context: " + result.metadata.aiContext + "\n";
+            }
           }
           
+          // Add links to different test modes
           response += "\nTo refresh metadata: " + req.url + "&refresh=true";
+          
+          // Add option to test with/without AI
+          if (includeAi) {
+            response += "\nTo test without AI: " + req.url + "&ai=false";
+          } else {
+            response += "\nTo test with AI: " + req.url.replace('&ai=false', '');
+          }
           
           res.writeHead(200, {'Content-Type': 'text/plain'});
           res.end(response);
